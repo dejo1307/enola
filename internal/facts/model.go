@@ -28,11 +28,13 @@ const (
 
 // Relation kind constants.
 const (
-	RelDeclares   = "declares"
-	RelImports    = "imports"
-	RelCalls      = "calls"
-	RelImplements = "implements"
-	RelDependsOn  = "depends_on"
+	RelDeclares     = "declares"
+	RelImports      = "imports"
+	RelCalls        = "calls"
+	RelImplements   = "implements"
+	RelDependsOn    = "depends_on"
+	RelInstantiates = "instantiates" // Source constructs an instance of target via a constructor call.
+	RelInjects      = "injects"      // Source declares target as a DI-injected constructor parameter.
 )
 
 // Symbol kind property values.
