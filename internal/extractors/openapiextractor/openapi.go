@@ -9,7 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/dejo1307/archmcp/internal/facts"
+	"github.com/dejo1307/enola/internal/facts"
 	"gopkg.in/yaml.v3"
 )
 
@@ -304,7 +304,7 @@ func hasOpenAPIContent(path string) bool {
 // skipDir returns true for directories that should never be descended into.
 func skipDir(name string) bool {
 	switch name {
-	case "vendor", "node_modules", ".git", ".archmcp", "backstage",
+	case "vendor", "node_modules", ".git", ".enola", "backstage",
 		"tmp", "log", "build", ".build", ".gradle":
 		return true
 	}

@@ -1,4 +1,4 @@
-# archmcp configuration for a Go project.
+# enola configuration for a Go project.
 #
 # Detection: The Go extractor activates when go.mod is present.
 # Features:  Packages, functions, types, interfaces, methods, imports,
@@ -9,7 +9,7 @@ ignore:
   # Dependencies and tooling
   - "vendor/**"
   - ".git/**"
-  - ".archmcp/**"
+  - ".enola/**"
   # Tests
   - "**/*_test.go"
   # Documentation
@@ -35,5 +35,5 @@ explainers:
 renderers:
   - llm_context
 output:
-  dir: ".archmcp"
+  dir: ".enola"
   max_context_tokens: 16000

@@ -6,7 +6,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/dejo1307/archmcp/internal/facts"
+	"github.com/dejo1307/enola/internal/facts"
 )
 
 // LLMContextRenderer produces a compact markdown summary optimized for LLM consumption.

@@ -4,7 +4,7 @@ ignore:
   - "vendor/**"
   - "node_modules/**"
   - ".git/**"
-  - ".archmcp/**"
+  - ".enola/**"
   # Tests
   - "**/*_test.go"
   - "**/*.test.ts"
@@ -73,5 +73,5 @@ explainers:
 renderers:
   - llm_context
 output:
-  dir: ".archmcp"
+  dir: ".enola"
   max_context_tokens: 4000

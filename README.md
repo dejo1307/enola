@@ -1,12 +1,12 @@
-# archmcp
+# enola
 
 Give your AI agent a map of the codebase before it starts exploring.
 
-archmcp is a local [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) server that generates compact architectural snapshots of repositories. Run it once, and your AI coding agent (Claude Code, Cursor, Copilot, or any MCP-compatible tool) gets a structured overview of modules, symbols, dependencies, routes, and architectural patterns - before it reads a single file.
+enola is a local [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) server that generates compact architectural snapshots of repositories. Run it once, and your AI coding agent (Claude Code, Cursor, Copilot, or any MCP-compatible tool) gets a structured overview of modules, symbols, dependencies, routes, and architectural patterns - before it reads a single file.
 
 ## What This Is (and Isn't)
 
-**A first step, not a replacement.** archmcp is designed to run *before* your AI agent starts exploring code. It gives the agent a structural overview so it knows where to look and what connects to what. It does not replace grep, file search, code reading, or any traditional discovery tool - it makes them more effective by providing upfront context.
+**A first step, not a replacement.** enola is designed to run *before* your AI agent starts exploring code. It gives the agent a structural overview so it knows where to look and what connects to what. It does not replace grep, file search, code reading, or any traditional discovery tool - it makes them more effective by providing upfront context.
 
 **Input for AI agents.** The snapshot output (modules, symbols, dependencies, architectural patterns) is structured context designed for LLM consumption. It is not a dashboard, not a visualization tool, not a documentation generator. It answers the question: *"What does this codebase look like?"* so the agent can skip the guessing phase.
 
@@ -14,7 +14,7 @@ archmcp is a local [Model Context Protocol (MCP)](https://modelcontextprotocol.i
 
 ## How It Works
 
-archmcp runs as a stdio-based MCP server. When connected to an LLM client, it exposes pre-generated architectural summaries (resources) and on-demand snapshot generation and querying (tools).
+enola runs as a stdio-based MCP server. When connected to an LLM client, it exposes pre-generated architectural summaries (resources) and on-demand snapshot generation and querying (tools).
 
 The pipeline:
 
@@ -27,7 +27,7 @@ Repository -> File Walker -> Extractors (Go, Kotlin, Python, TypeScript, Swift, 
 
 ## See It In Action
 
-The examples below show the archmcp output in action. Specific prompts were asking different models to explain authentication and authorization flows in detail across the three repositories where one was Web UI client, another backend, and the third one custom authentication provider.
+The examples below show the enola output in action. Specific prompts were asking different models to explain authentication and authorization flows in detail across the three repositories where one was Web UI client, another backend, and the third one custom authentication provider.
 
 ### Generating a snapshot (Claude Code)
 
@@ -47,13 +47,13 @@ The examples below show the archmcp output in action. Specific prompts were aski
 ### Build
 
 ```bash
-go build -o archmcp ./cmd/archmcp
+go build -o enola ./cmd/enola
 ```
 
 Or install globally:
 
 ```bash
-go install ./cmd/archmcp
+go install ./cmd/enola
 ```
 
 ### Connect to your MCP client
@@ -63,8 +63,8 @@ Add to your MCP client configuration. For example, in Cursor's `mcp.json`:
 ```json
 {
   "mcpServers": {
-    "archmcp": {
-      "command": "/path/to/archmcp",
+    "enola": {
+      "command": "/path/to/enola",
       "args": ["/path/to/mcp-arch.yaml"]
     }
   }
@@ -76,8 +76,8 @@ Or if installed via `go install`:
 ```json
 {
   "mcpServers": {
-    "archmcp": {
-      "command": "archmcp"
+    "enola": {
+      "command": "enola"
     }
   }
 }
@@ -88,10 +88,10 @@ Or if installed via `go install`:
 Run a one-shot snapshot generation without starting the MCP server:
 
 ```bash
-archmcp --generate [config_path]
+enola --generate [config_path]
 ```
 
-`config_path` is optional (default: `mcp-arch.yaml`). Artifacts are written to the configured `output.dir` (default `.archmcp/`).
+`config_path` is optional (default: `mcp-arch.yaml`). Artifacts are written to the configured `output.dir` (default `.enola/`).
 
 ## Developer Workflow
 
@@ -107,7 +107,7 @@ This runs the full pipeline and takes milliseconds even on large repos. The LLM 
 
 ### Step 2: Use the context in your prompts
 
-Once the snapshot exists, you do not need to reference archmcp explicitly. The LLM can read the `arch://snapshot/context` resource automatically. Just ask your questions naturally - the architectural context is there.
+Once the snapshot exists, you do not need to reference enola explicitly. The LLM can read the `arch://snapshot/context` resource automatically. Just ask your questions naturally - the architectural context is there.
 
 ### Example Prompts
 
@@ -177,7 +177,7 @@ ignore:
   - "vendor/**"
   - "node_modules/**"
   - ".git/**"
-  - ".archmcp/**"
+  - ".enola/**"
   # Tests
   - "**/*_test.go"
   - "**/*.test.ts"
@@ -244,7 +244,7 @@ explainers:
 renderers:
   - llm_context
 output:
-  dir: ".archmcp"
+  dir: ".enola"
   max_context_tokens: 16000
 ```
 
@@ -257,12 +257,12 @@ output:
 | `extractors` | Enabled extractors | `["go", "kotlin", "openapi", "python", "typescript", "swift", "ruby"]` |
 | `explainers` | Enabled explainers | `["cycles", "layers"]` |
 | `renderers` | Enabled renderers | `["llm_context"]` |
-| `output.dir` | Output directory for artifacts | `".archmcp"` |
+| `output.dir` | Output directory for artifacts | `".enola"` |
 | `output.max_context_tokens` | Token budget for LLM context | `16000` |
 
 ## Cross-Repo Analysis
 
-archmcp supports analyzing multiple repositories together. Use `append` mode to incrementally build a combined fact store across repos, then query across all of them.
+enola supports analyzing multiple repositories together. Use `append` mode to incrementally build a combined fact store across repos, then query across all of them.
 
 ### How It Works
 
@@ -290,7 +290,7 @@ The `show_symbol` and `explore` tools automatically resolve file paths across re
 
 ## Output Artifacts
 
-After running `generate_snapshot`, the following files are written to the output directory (default `.archmcp/`):
+After running `generate_snapshot`, the following files are written to the output directory (default `.enola/`):
 
 | File | Description |
 |------|-------------|
@@ -404,7 +404,7 @@ Each fact can have **relations** to other facts: `declares`, `imports`, `calls`,
 
 ### Graph Index
 
-After facts are extracted, archmcp builds a bidirectional adjacency-list graph from all facts and relations. This graph enables the three traversal tools (`traverse`, `find_path`, `impact_analysis`) to efficiently answer questions about transitive dependencies, call chains, and change impact without re-scanning the fact store. The graph is built once per snapshot and cached in memory.
+After facts are extracted, enola builds a bidirectional adjacency-list graph from all facts and relations. This graph enables the three traversal tools (`traverse`, `find_path`, `impact_analysis`) to efficiently answer questions about transitive dependencies, call chains, and change impact without re-scanning the fact store. The graph is built once per snapshot and cached in memory.
 
 ### Plugin System
 
@@ -418,13 +418,13 @@ All plugins are registered in-process via Go interfaces. Future versions may sup
 
 ### Incremental Updates
 
-archmcp tracks file content hashes (SHA-256) in `snapshot.meta.json`. On subsequent runs, only files that have changed are re-extracted, making repeated snapshots fast on large repositories.
+enola tracks file content hashes (SHA-256) in `snapshot.meta.json`. On subsequent runs, only files that have changed are re-extracted, making repeated snapshots fast on large repositories.
 
 ## Project Structure
 
 ```
-archmcp/
-├── cmd/archmcp/main.go              # Entry point
+enola/
+├── cmd/enola/main.go              # Entry point
 ├── internal/
 │   ├── config/config.go             # YAML config
 │   ├── engine/engine.go             # Pipeline orchestrator

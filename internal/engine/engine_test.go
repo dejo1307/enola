@@ -6,8 +6,8 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/dejo1307/archmcp/internal/config"
-	"github.com/dejo1307/archmcp/internal/facts"
+	"github.com/dejo1307/enola/internal/config"
+	"github.com/dejo1307/enola/internal/facts"
 )
 
 func TestIsIgnored(t *testing.T) {
@@ -61,9 +61,9 @@ func TestIsIgnored(t *testing.T) {
 			true,
 		},
 		{
-			"archmcp output dir",
-			".archmcp/facts.jsonl", false,
-			[]string{".archmcp/**"},
+			"enola output dir",
+			".enola/facts.jsonl", false,
+			[]string{".enola/**"},
 			true,
 		},
 		{

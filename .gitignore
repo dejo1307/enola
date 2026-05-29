@@ -10,8 +10,8 @@
 
 # Test binary, built with `go test -c`
 *.test
-archmcp
-.archmcp
+enola
+.enola
 
 # Code coverage profiles and other test artifacts
 *.out

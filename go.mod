@@ -1,4 +1,4 @@
-module github.com/dejo1307/archmcp
+module github.com/dejo1307/enola
 
 go 1.25.1
 
