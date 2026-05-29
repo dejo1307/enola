@@ -1,4 +1,4 @@
-# archmcp full configuration with all languages enabled.
+# enola full configuration with all languages enabled.
 #
 # This config includes all supported extractors and comprehensive
 # ignore patterns for every language. Use this as a starting point
@@ -17,7 +17,7 @@ ignore:
   - "vendor/**"
   - "node_modules/**"
   - ".git/**"
-  - ".archmcp/**"
+  - ".enola/**"
 
   # Go tests
   - "**/*_test.go"
@@ -94,5 +94,5 @@ explainers:
 renderers:
   - llm_context
 output:
-  dir: ".archmcp"
+  dir: ".enola"
   max_context_tokens: 16000

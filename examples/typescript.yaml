@@ -1,4 +1,4 @@
-# archmcp configuration for a TypeScript / Next.js project.
+# enola configuration for a TypeScript / Next.js project.
 #
 # Detection: The TypeScript extractor activates when tsconfig.json exists
 #            or package.json has TypeScript in dependencies/devDependencies.
@@ -10,7 +10,7 @@ ignore:
   # Dependencies and tooling
   - "node_modules/**"
   - ".git/**"
-  - ".archmcp/**"
+  - ".enola/**"
   # Tests
   - "**/*.test.ts"
   - "**/*.test.tsx"
@@ -45,5 +45,5 @@ explainers:
 renderers:
   - llm_context
 output:
-  dir: ".archmcp"
+  dir: ".enola"
   max_context_tokens: 16000

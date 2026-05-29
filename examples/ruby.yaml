@@ -1,4 +1,4 @@
-# archmcp configuration for a Ruby / Rails project.
+# enola configuration for a Ruby / Rails project.
 #
 # Detection: The Ruby extractor activates when a Gemfile is present.
 #            Rails-specific features activate when config/application.rb
@@ -15,7 +15,7 @@ ignore:
   # Dependencies and tooling
   - "vendor/**"
   - ".git/**"
-  - ".archmcp/**"
+  - ".enola/**"
   # Tests
   - "**/*_spec.rb"
   - "**/*_test.rb"
@@ -50,5 +50,5 @@ explainers:
 renderers:
   - llm_context
 output:
-  dir: ".archmcp"
+  dir: ".enola"
   max_context_tokens: 16000

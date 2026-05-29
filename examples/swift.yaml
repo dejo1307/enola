@@ -1,4 +1,4 @@
-# archmcp configuration for a Swift / iOS project.
+# enola configuration for a Swift / iOS project.
 #
 # Detection: The Swift extractor activates when Package.swift, .xcodeproj,
 #            or .xcworkspace is present.
@@ -12,7 +12,7 @@ repo: "."
 ignore:
   # Dependencies and tooling
   - ".git/**"
-  - ".archmcp/**"
+  - ".enola/**"
   # Swift / Xcode build and cache
   - "DerivedData/**"
   - "**/DerivedData/**"
@@ -48,5 +48,5 @@ explainers:
 renderers:
   - llm_context
 output:
-  dir: ".archmcp"
+  dir: ".enola"
   max_context_tokens: 16000

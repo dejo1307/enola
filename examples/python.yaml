@@ -1,4 +1,4 @@
-# archmcp configuration for a Python project.
+# enola configuration for a Python project.
 #
 # Detection: The Python extractor activates when any of the following are found
 #            at the repo root or up to 3 subdirectory levels deep (for monorepos):
@@ -15,7 +15,7 @@ repo: "."
 ignore:
   # Dependencies and tooling
   - ".git/**"
-  - ".archmcp/**"
+  - ".enola/**"
   - "__pycache__/**"
   - "**/__pycache__/**"
   - ".venv/**"
@@ -63,5 +63,5 @@ explainers:
 renderers:
   - llm_context
 output:
-  dir: ".archmcp"
+  dir: ".enola"
   max_context_tokens: 16000

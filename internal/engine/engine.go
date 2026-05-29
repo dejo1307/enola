@@ -15,11 +15,11 @@ import (
 	"sync"
 	"time"
 
-	"github.com/dejo1307/archmcp/internal/config"
-	"github.com/dejo1307/archmcp/internal/explainers"
-	"github.com/dejo1307/archmcp/internal/extractors"
-	"github.com/dejo1307/archmcp/internal/facts"
-	"github.com/dejo1307/archmcp/internal/renderers"
+	"github.com/dejo1307/enola/internal/config"
+	"github.com/dejo1307/enola/internal/explainers"
+	"github.com/dejo1307/enola/internal/extractors"
+	"github.com/dejo1307/enola/internal/facts"
+	"github.com/dejo1307/enola/internal/renderers"
 )
 
 // Engine orchestrates the snapshot generation pipeline.

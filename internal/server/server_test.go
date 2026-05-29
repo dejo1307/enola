@@ -6,9 +6,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/dejo1307/archmcp/internal/config"
-	"github.com/dejo1307/archmcp/internal/engine"
-	"github.com/dejo1307/archmcp/internal/facts"
+	"github.com/dejo1307/enola/internal/config"
+	"github.com/dejo1307/enola/internal/engine"
+	"github.com/dejo1307/enola/internal/facts"
 )
 
 func TestReadSourceWindow(t *testing.T) {

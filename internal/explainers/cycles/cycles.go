@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/dejo1307/archmcp/internal/facts"
+	"github.com/dejo1307/enola/internal/facts"
 )
 
 // CycleExplainer detects cyclic dependencies between modules using Tarjan's SCC algorithm.

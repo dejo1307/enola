@@ -38,13 +38,13 @@ func Default() *Config {
 			"**/*.spec.tsx",
 			"**/*_spec.rb",
 			"**/*_test.rb",
-			".archmcp/**",
+			".enola/**",
 		},
 		Extractors: []string{"go", "kotlin", "openapi", "python", "typescript", "swift", "ruby"},
 		Explainers: []string{"cycles", "layers"},
 		Renderers:  []string{"llm_context"},
 		Output: OutputConfig{
-			Dir:              ".archmcp",
+			Dir:              ".enola",
 			MaxContextTokens: 16000,
 		},
 	}
@@ -65,7 +65,7 @@ func Load(path string) (*Config, error) {
 
 	// Ensure required defaults
 	if cfg.Output.Dir == "" {
-		cfg.Output.Dir = ".archmcp"
+		cfg.Output.Dir = ".enola"
 	}
 	if cfg.Output.MaxContextTokens == 0 {
 		cfg.Output.MaxContextTokens = 16000

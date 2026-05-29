@@ -10,7 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/dejo1307/archmcp/internal/facts"
+	"github.com/dejo1307/enola/internal/facts"
 )
 
 // GoExtractor extracts architectural facts from Go source code using go/ast.

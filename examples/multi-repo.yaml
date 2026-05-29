@@ -1,4 +1,4 @@
-# archmcp configuration for cross-repo analysis.
+# enola configuration for cross-repo analysis.
 #
 # This config enables all extractors so it works regardless of which
 # languages each repository uses. Use append mode to build a combined
@@ -25,7 +25,7 @@ ignore:
   - "vendor/**"
   - "node_modules/**"
   - ".git/**"
-  - ".archmcp/**"
+  - ".enola/**"
   # Go tests
   - "**/*_test.go"
   # TypeScript tests
@@ -91,5 +91,5 @@ explainers:
 renderers:
   - llm_context
 output:
-  dir: ".archmcp"
+  dir: ".enola"
   max_context_tokens: 16000

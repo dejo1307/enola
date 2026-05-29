@@ -7,7 +7,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/dejo1307/archmcp/internal/facts"
+	"github.com/dejo1307/enola/internal/facts"
 )
 
 var (

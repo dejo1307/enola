@@ -1,4 +1,4 @@
-# archmcp configuration for a Kotlin / Android project.
+# enola configuration for a Kotlin / Android project.
 #
 # Detection: The Kotlin extractor activates when build.gradle.kts or
 #            build.gradle contains "kotlin" or "android".
@@ -11,7 +11,7 @@ ignore:
   # Dependencies and tooling
   - "vendor/**"
   - ".git/**"
-  - ".archmcp/**"
+  - ".enola/**"
   # Kotlin / Android build and cache
   - "build/**"
   - "**/build/**"
@@ -44,5 +44,5 @@ explainers:
 renderers:
   - llm_context
 output:
-  dir: ".archmcp"
+  dir: ".enola"
   max_context_tokens: 16000

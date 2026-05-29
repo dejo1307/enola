@@ -9,9 +9,9 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/dejo1307/archmcp/internal/config"
-	"github.com/dejo1307/archmcp/internal/engine"
-	"github.com/dejo1307/archmcp/internal/facts"
+	"github.com/dejo1307/enola/internal/config"
+	"github.com/dejo1307/enola/internal/engine"
+	"github.com/dejo1307/enola/internal/facts"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -30,7 +30,7 @@ func New(eng *engine.Engine, cfg *config.Config) (*Server, error) {
 	}
 
 	mcpServer := mcp.NewServer(&mcp.Implementation{
-		Name:    "archmcp",
+		Name:    "enola",
 		Version: "0.1.0",
 	}, nil)
 
