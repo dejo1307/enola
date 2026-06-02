@@ -10,13 +10,12 @@
 
 # Test binary, built with `go test -c`
 *.test
-enola
-.enola
 
 # Code coverage profiles and other test artifacts
 *.out
 coverage.*
 *.coverprofile
+*.enola
 profile.cov
 
 # Dependency directories (remove the comment below to include it)
