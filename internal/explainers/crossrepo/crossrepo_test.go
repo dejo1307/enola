@@ -12,21 +12,21 @@ func TestExplain_SummarizesCrossRepoEdges(t *testing.T) {
 	s := facts.NewStore()
 	s.Add(
 		facts.Fact{
-			Kind: facts.KindDependency, Name: "svc-pricing -> svc-catalogue", Repo: "svc-pricing",
+			Kind: facts.KindDependency, Name: "svc-alpha -> svc-beta", Repo: "svc-alpha",
 			Props: map[string]any{
 				"type": "cross_repo", "synthetic": "crossrepo",
 				"via": []string{"http"}, "endpoint_count": 3,
 			},
 		},
 		facts.Fact{
-			Kind: facts.KindDependency, Name: "marketplace-web-app -> marketplace-web", Repo: "marketplace-web-app",
+			Kind: facts.KindDependency, Name: "app-web-app -> app-web", Repo: "app-web-app",
 			Props: map[string]any{
 				"type": "cross_repo", "synthetic": "crossrepo",
 				"via": []string{"import"}, "import_count": 7,
 			},
 		},
 		// A non-cross-repo dependency must be ignored.
-		facts.Fact{Kind: facts.KindDependency, Name: "a -> b", Repo: "svc-pricing"},
+		facts.Fact{Kind: facts.KindDependency, Name: "a -> b", Repo: "svc-alpha"},
 	)
 
 	insights, err := New().Explain(context.Background(), s)
@@ -43,7 +43,7 @@ func TestExplain_SummarizesCrossRepoEdges(t *testing.T) {
 	if len(ins.Evidence) != 2 {
 		t.Errorf("evidence count = %d, want 2", len(ins.Evidence))
 	}
-	if !strings.Contains(ins.Description, "svc-pricing -> svc-catalogue") ||
+	if !strings.Contains(ins.Description, "svc-alpha -> svc-beta") ||
 		!strings.Contains(ins.Description, "3 endpoint") {
 		t.Errorf("description missing expected detail: %q", ins.Description)
 	}

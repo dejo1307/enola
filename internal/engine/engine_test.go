@@ -172,14 +172,14 @@ func TestLinkCrossRepo_ConnectsServicesInGraph(t *testing.T) {
 	cfg := config.Default()
 	eng, _ := New(cfg)
 
-	// Two repos: svc-pricing calls an endpoint svc-catalogue serves.
+	// Two repos: svc-alpha calls an endpoint svc-beta serves.
 	eng.Store().Add(
 		facts.Fact{
-			Kind: facts.KindRoute, Name: "/api/items/{id}", Repo: "svc-pricing",
+			Kind: facts.KindRoute, Name: "/api/items/{id}", Repo: "svc-alpha",
 			Props: map[string]any{"method": "GET", "role": "client"},
 		},
 		facts.Fact{
-			Kind: facts.KindRoute, Name: "/api/items/{id}", Repo: "svc-catalogue",
+			Kind: facts.KindRoute, Name: "/api/items/{id}", Repo: "svc-beta",
 			Props: map[string]any{"method": "GET", "role": "server"},
 		},
 	)
@@ -193,25 +193,25 @@ func TestLinkCrossRepo_ConnectsServicesInGraph(t *testing.T) {
 	if len(depFacts) != 1 {
 		t.Fatalf("cross_repo dep facts = %d, want 1", len(depFacts))
 	}
-	if depFacts[0].Repo != "svc-pricing" || depFacts[0].Name != "svc-pricing -> svc-catalogue" {
-		t.Errorf("edge = %+v, want svc-pricing -> svc-catalogue", depFacts[0])
+	if depFacts[0].Repo != "svc-alpha" || depFacts[0].Name != "svc-alpha -> svc-beta" {
+		t.Errorf("edge = %+v, want svc-alpha -> svc-beta", depFacts[0])
 	}
 
 	// The graph now connects the two service nodes.
 	eng.Store().BuildGraph()
 	g := eng.Store().Graph()
-	res := g.Traverse("svc-pricing", "forward", nil, nil, 5, 100)
+	res := g.Traverse("svc-alpha", "forward", nil, nil, 5, 100)
 	reached := false
 	for _, n := range res.Nodes {
-		if n.Name == "svc-catalogue" {
+		if n.Name == "svc-beta" {
 			reached = true
 		}
 	}
 	if !reached {
-		t.Errorf("traverse from svc-pricing did not reach svc-catalogue: %+v", res.Nodes)
+		t.Errorf("traverse from svc-alpha did not reach svc-beta: %+v", res.Nodes)
 	}
-	if path := g.FindPath("svc-pricing", "svc-catalogue", nil, 10); !path.Found {
-		t.Errorf("FindPath(svc-pricing, svc-catalogue) not found")
+	if path := g.FindPath("svc-alpha", "svc-beta", nil, 10); !path.Found {
+		t.Errorf("FindPath(svc-alpha, svc-beta) not found")
 	}
 
 	// Idempotent: re-running linking keeps exactly one service node per repo

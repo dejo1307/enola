@@ -233,8 +233,8 @@ func importProvider(target, consumer string, normToLabel map[string]string) stri
 }
 
 // importCandidates extracts the identifier tokens an import target may name a
-// repo by, most-significant first: e.g. "@marketplace-web/core-api" ->
-// ["marketplace-web", "core-api"], "core/foo" -> ["core", "foo"].
+// repo by, most-significant first: e.g. "@app-web/lib-api" ->
+// ["app-web", "lib-api"], "lib-core/foo" -> ["lib-core", "foo"].
 func importCandidates(target string) []string {
 	t := strings.TrimPrefix(target, "@")
 	parts := strings.Split(t, "/")
@@ -402,8 +402,8 @@ func isGenericPath(normPath string) bool {
 	return len(segs) < 2
 }
 
-// normalizeLabel lowercases and strips '-'/'_' so "marketplace-web",
-// "marketplace_web", and "MarketplaceWeb" all compare equal.
+// normalizeLabel lowercases and strips '-'/'_' so "app-web",
+// "app_web", and "AppWeb" all compare equal.
 func normalizeLabel(s string) string {
 	s = strings.ToLower(strings.TrimSpace(s))
 	s = strings.ReplaceAll(s, "-", "")

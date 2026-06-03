@@ -125,18 +125,18 @@ func TestRender_EmptySnapshot(t *testing.T) {
 
 func TestCrossRepo_RendersDependencyTable(t *testing.T) {
 	ff := []facts.Fact{
-		{Kind: facts.KindService, Name: "svc-pricing", Repo: "svc-pricing",
-			Relations: []facts.Relation{{Kind: facts.RelDependsOn, Target: "svc-catalogue"}}},
-		{Kind: facts.KindService, Name: "svc-catalogue", Repo: "svc-catalogue"},
-		{Kind: facts.KindDependency, Name: "svc-pricing -> svc-catalogue", Repo: "svc-pricing",
+		{Kind: facts.KindService, Name: "svc-alpha", Repo: "svc-alpha",
+			Relations: []facts.Relation{{Kind: facts.RelDependsOn, Target: "svc-beta"}}},
+		{Kind: facts.KindService, Name: "svc-beta", Repo: "svc-beta"},
+		{Kind: facts.KindDependency, Name: "svc-alpha -> svc-beta", Repo: "svc-alpha",
 			Props: map[string]any{
 				"type": "cross_repo", "via": []string{"http"},
 				"endpoint_count": 1, "endpoints": []string{"GET /api/items/{id}"},
 			}},
-		{Kind: facts.KindDependency, Name: "svc-pricing -> core", Repo: "svc-pricing",
+		{Kind: facts.KindDependency, Name: "svc-alpha -> lib-core", Repo: "svc-alpha",
 			Props: map[string]any{
 				"type": "cross_repo", "via": []string{"import"},
-				"import_count": 1, "import_samples": []string{"core/money/converter"},
+				"import_count": 1, "import_samples": []string{"lib-core/money/converter"},
 			}},
 	}
 	content := string(mustRender(t, makeSnapshot(ff, nil)))
@@ -145,10 +145,10 @@ func TestCrossRepo_RendersDependencyTable(t *testing.T) {
 		t.Fatalf("missing Cross-Repo Dependencies section:\n%s", content)
 	}
 	for _, want := range []string{
-		"`svc-pricing` | `svc-catalogue` | http",
+		"`svc-alpha` | `svc-beta` | http",
 		"GET /api/items/{id}",
-		"`svc-pricing` | `core` | import",
-		"core/money/converter",
+		"`svc-alpha` | `lib-core` | import",
+		"lib-core/money/converter",
 	} {
 		if !strings.Contains(content, want) {
 			t.Errorf("cross-repo table missing %q in:\n%s", want, content)
@@ -216,18 +216,18 @@ func TestRiskZones_IncludesCyclesAndViolations(t *testing.T) {
 
 func TestCriticalModules_FanInFanOut(t *testing.T) {
 	ff := []facts.Fact{
-		{Kind: facts.KindModule, Name: "core"},
+		{Kind: facts.KindModule, Name: "lib-core"},
 		{Kind: facts.KindModule, Name: "a"},
 		{Kind: facts.KindModule, Name: "b"},
 		{Kind: facts.KindModule, Name: "c"},
 	}
-	// a, b, c all import core → core has fanIn=3
+	// a, b, c all import lib-core → lib-core has fanIn=3
 	for _, src := range []string{"a", "b", "c"} {
 		ff = append(ff, facts.Fact{
 			Kind: facts.KindDependency,
 			File: src + "/file.go",
 			Relations: []facts.Relation{
-				{Kind: facts.RelImports, Target: "core"},
+				{Kind: facts.RelImports, Target: "lib-core"},
 			},
 		})
 	}
@@ -240,12 +240,12 @@ func TestCriticalModules_FanInFanOut(t *testing.T) {
 	}
 
 	content := string(artifacts[0].Content)
-	if !strings.Contains(content, "`core`") {
-		t.Error("expected core module in Critical Modules table")
+	if !strings.Contains(content, "`lib-core`") {
+		t.Error("expected lib-core module in Critical Modules table")
 	}
-	// core has fanIn=3, fanOut=0, score=3 → "low" criticality
+	// lib-core has fanIn=3, fanOut=0, score=3 → "low" criticality
 	if !strings.Contains(content, "| 3 | 0 |") {
-		t.Error("expected core to have fanIn=3, fanOut=0")
+		t.Error("expected lib-core to have fanIn=3, fanOut=0")
 	}
 }
 

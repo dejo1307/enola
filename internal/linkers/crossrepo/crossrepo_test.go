@@ -99,9 +99,9 @@ func TestNormalizePath(t *testing.T) {
 }
 
 func TestNormalizeLabel(t *testing.T) {
-	for _, in := range []string{"marketplace-web", "marketplace_web", "MarketplaceWeb", "MARKETPLACE-WEB"} {
-		if got := normalizeLabel(in); got != "marketplaceweb" {
-			t.Errorf("normalizeLabel(%q) = %q, want marketplaceweb", in, got)
+	for _, in := range []string{"app-web", "app_web", "AppWeb", "APP-WEB"} {
+		if got := normalizeLabel(in); got != "appweb" {
+			t.Errorf("normalizeLabel(%q) = %q, want appweb", in, got)
 		}
 	}
 }
@@ -125,21 +125,21 @@ func TestIsGenericPath(t *testing.T) {
 
 func TestComputeLinks_HTTPMatch(t *testing.T) {
 	in := []facts.Fact{
-		clientRoute("svc-pricing", "/api/items/{id}", "GET", nil),
-		serverRoute("svc-catalogue", "/api/items/{itemId}", "GET"),
-		serverRoute("svc-catalogue", "/api/items/{itemId}", "POST"), // method mismatch — ignored
+		clientRoute("svc-alpha", "/api/items/{id}", "GET", nil),
+		serverRoute("svc-beta", "/api/items/{itemId}", "GET"),
+		serverRoute("svc-beta", "/api/items/{itemId}", "POST"), // method mismatch — ignored
 	}
 	out := ComputeLinks(in)
 
-	if got, want := serviceNodes(out), []string{"svc-catalogue", "svc-pricing"}; !reflect.DeepEqual(got, want) {
+	if got, want := serviceNodes(out), []string{"svc-alpha", "svc-beta"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("service nodes = %v, want %v", got, want)
 	}
-	if !hasServiceEdge(out, "svc-pricing", "svc-catalogue") {
-		t.Fatalf("svc-pricing service node missing depends_on svc-catalogue; got %+v", out)
+	if !hasServiceEdge(out, "svc-alpha", "svc-beta") {
+		t.Fatalf("svc-alpha service node missing depends_on svc-beta; got %+v", out)
 	}
-	e := findEdge(out, "svc-pricing", "svc-catalogue")
+	e := findEdge(out, "svc-alpha", "svc-beta")
 	if e == nil {
-		t.Fatalf("missing svc-pricing -> svc-catalogue edge; got %+v", out)
+		t.Fatalf("missing svc-alpha -> svc-beta edge; got %+v", out)
 	}
 	if e.Props["type"] != "cross_repo" || e.Props["synthetic"] != SyntheticMarker {
 		t.Errorf("edge props = %v", e.Props)
@@ -153,21 +153,21 @@ func TestComputeLinks_HTTPMatch(t *testing.T) {
 }
 
 func TestComputeLinks_HTTPGatewayPath(t *testing.T) {
-	server := serverRoute("svc-catalogue", "/items/{id}", "GET")
+	server := serverRoute("svc-beta", "/items/{id}", "GET")
 	server.Props["gateway_path"] = "/api/catalogue/items/{id}"
 	in := []facts.Fact{
-		clientRoute("svc-pricing", "/api/catalogue/items/{id}", "GET", nil),
+		clientRoute("svc-alpha", "/api/catalogue/items/{id}", "GET", nil),
 		server,
 	}
-	if findEdge(ComputeLinks(in), "svc-pricing", "svc-catalogue") == nil {
+	if findEdge(ComputeLinks(in), "svc-alpha", "svc-beta") == nil {
 		t.Errorf("expected gateway-path match to produce an edge")
 	}
 }
 
 func TestComputeLinks_HTTPGenericPathSkipped(t *testing.T) {
 	in := []facts.Fact{
-		clientRoute("svc-pricing", "/health", "GET", nil),
-		serverRoute("svc-catalogue", "/health", "GET"),
+		clientRoute("svc-alpha", "/health", "GET", nil),
+		serverRoute("svc-beta", "/health", "GET"),
 	}
 	if out := ComputeLinks(in); len(out) != 0 {
 		t.Errorf("generic path produced links: %+v", out)
@@ -176,8 +176,8 @@ func TestComputeLinks_HTTPGenericPathSkipped(t *testing.T) {
 
 func TestComputeLinks_HTTPSelfLinkSkipped(t *testing.T) {
 	in := []facts.Fact{
-		clientRoute("svc-pricing", "/api/items/{id}", "GET", nil),
-		serverRoute("svc-pricing", "/api/items/{id}", "GET"),
+		clientRoute("svc-alpha", "/api/items/{id}", "GET", nil),
+		serverRoute("svc-alpha", "/api/items/{id}", "GET"),
 	}
 	if out := ComputeLinks(in); len(out) != 0 {
 		t.Errorf("self-link produced links: %+v", out)
@@ -186,23 +186,23 @@ func TestComputeLinks_HTTPSelfLinkSkipped(t *testing.T) {
 
 func TestComputeLinks_HTTPAmbiguousResolvedByHint(t *testing.T) {
 	in := []facts.Fact{
-		clientRoute("svc-pricing", "/api/items/{id}", "GET", map[string]any{"api": "svc-catalogue"}),
-		serverRoute("svc-catalogue", "/api/items/{id}", "GET"),
+		clientRoute("svc-alpha", "/api/items/{id}", "GET", map[string]any{"api": "svc-beta"}),
+		serverRoute("svc-beta", "/api/items/{id}", "GET"),
 		serverRoute("svc-other", "/api/items/{id}", "GET"),
 	}
 	out := ComputeLinks(in)
-	if findEdge(out, "svc-pricing", "svc-catalogue") == nil {
-		t.Errorf("hint did not resolve to svc-catalogue: %+v", out)
+	if findEdge(out, "svc-alpha", "svc-beta") == nil {
+		t.Errorf("hint did not resolve to svc-beta: %+v", out)
 	}
-	if findEdge(out, "svc-pricing", "svc-other") != nil {
+	if findEdge(out, "svc-alpha", "svc-other") != nil {
 		t.Errorf("unexpected edge to svc-other")
 	}
 }
 
 func TestComputeLinks_HTTPAmbiguousNoHintSkipped(t *testing.T) {
 	in := []facts.Fact{
-		clientRoute("svc-pricing", "/api/items/{id}", "GET", nil),
-		serverRoute("svc-catalogue", "/api/items/{id}", "GET"),
+		clientRoute("svc-alpha", "/api/items/{id}", "GET", nil),
+		serverRoute("svc-beta", "/api/items/{id}", "GET"),
 		serverRoute("svc-other", "/api/items/{id}", "GET"),
 	}
 	for _, f := range ComputeLinks(in) {
@@ -216,11 +216,11 @@ func TestComputeLinks_HTTPAmbiguousNoHintSkipped(t *testing.T) {
 
 func TestComputeLinks_ImportMatch(t *testing.T) {
 	in := []facts.Fact{
-		importDep("marketplace-web-app", "@marketplace-web/core-api/api-client-util"),
-		facts.Fact{Kind: facts.KindModule, Name: "core-api", Repo: "marketplace-web"},
+		importDep("app-web-app", "@app-web/lib-api/api-client-util"),
+		facts.Fact{Kind: facts.KindModule, Name: "lib-api", Repo: "app-web"},
 	}
 	out := ComputeLinks(in)
-	e := findEdge(out, "marketplace-web-app", "marketplace-web")
+	e := findEdge(out, "app-web-app", "app-web")
 	if e == nil {
 		t.Fatalf("missing import edge; got %+v", out)
 	}
@@ -234,19 +234,19 @@ func TestComputeLinks_ImportMatch(t *testing.T) {
 
 func TestComputeLinks_ImportRubyStyle(t *testing.T) {
 	in := []facts.Fact{
-		importDep("svc-pricing", "core/money/converter"),
-		facts.Fact{Kind: facts.KindModule, Name: "money", Repo: "core"},
+		importDep("svc-alpha", "lib-core/money/converter"),
+		facts.Fact{Kind: facts.KindModule, Name: "money", Repo: "lib-core"},
 	}
-	if findEdge(ComputeLinks(in), "svc-pricing", "core") == nil {
-		t.Errorf("expected svc-pricing -> core import edge")
+	if findEdge(ComputeLinks(in), "svc-alpha", "lib-core") == nil {
+		t.Errorf("expected svc-alpha -> lib-core import edge")
 	}
 }
 
 func TestComputeLinks_ImportRelativeAndSelfIgnored(t *testing.T) {
 	in := []facts.Fact{
-		importDep("svc-pricing", "./local/thing"),    // relative — skip
-		importDep("svc-pricing", "svc-pricing/inner"), // self — skip
-		facts.Fact{Kind: facts.KindModule, Name: "x", Repo: "core"},
+		importDep("svc-alpha", "./local/thing"),      // relative — skip
+		importDep("svc-alpha", "svc-alpha/inner"),    // self — skip
+		facts.Fact{Kind: facts.KindModule, Name: "x", Repo: "lib-core"},
 	}
 	if out := ComputeLinks(in); len(out) != 0 {
 		t.Errorf("relative/self imports produced links: %+v", out)
@@ -257,13 +257,13 @@ func TestComputeLinks_ImportRelativeAndSelfIgnored(t *testing.T) {
 
 func TestComputeLinks_MergedViaAndDeterministic(t *testing.T) {
 	in := []facts.Fact{
-		clientRoute("svc-pricing", "/api/items/{id}", "GET", nil),
-		serverRoute("svc-catalogue", "/api/items/{id}", "GET"),
-		importDep("svc-pricing", "svc-catalogue/client"),
-		facts.Fact{Kind: facts.KindModule, Name: "client", Repo: "svc-catalogue"},
+		clientRoute("svc-alpha", "/api/items/{id}", "GET", nil),
+		serverRoute("svc-beta", "/api/items/{id}", "GET"),
+		importDep("svc-alpha", "svc-beta/client"),
+		facts.Fact{Kind: facts.KindModule, Name: "client", Repo: "svc-beta"},
 	}
 	out1 := ComputeLinks(in)
-	e := findEdge(out1, "svc-pricing", "svc-catalogue")
+	e := findEdge(out1, "svc-alpha", "svc-beta")
 	if e == nil {
 		t.Fatalf("missing merged edge: %+v", out1)
 	}
@@ -280,8 +280,8 @@ func TestComputeLinks_MergedViaAndDeterministic(t *testing.T) {
 
 func TestComputeLinks_SingleRepoNoLinks(t *testing.T) {
 	in := []facts.Fact{
-		clientRoute("svc-pricing", "/api/items/{id}", "GET", nil),
-		serverRoute("svc-pricing", "/api/items/{id}", "GET"),
+		clientRoute("svc-alpha", "/api/items/{id}", "GET", nil),
+		serverRoute("svc-alpha", "/api/items/{id}", "GET"),
 	}
 	if out := ComputeLinks(in); out != nil {
 		t.Errorf("single repo produced links: %+v", out)
