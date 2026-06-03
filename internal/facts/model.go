@@ -24,6 +24,7 @@ const (
 	KindRoute      = "route"
 	KindStorage    = "storage"
 	KindDependency = "dependency"
+	KindService    = "service" // A whole repository, represented as a node in the cross-repo "graph of graphs".
 )
 
 // Relation kind constants.

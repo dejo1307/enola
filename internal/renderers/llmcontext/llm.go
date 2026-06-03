@@ -40,6 +40,7 @@ func (r *LLMContextRenderer) Render(ctx context.Context, snapshot *facts.Snapsho
 	sections := []section{
 		{"Repository Map", r.renderRepoMap(snapshot)},
 		{"Architecture Pattern", r.renderArchPattern(snapshot)},
+		{"Cross-Repo Dependencies", r.renderCrossRepo(snapshot)},
 		{"Entry Points", r.renderEntryPoints(snapshot)},
 		{"Routes", r.renderRoutes(snapshot)},
 		{"Storage", r.renderStorage(snapshot)},
@@ -165,6 +166,76 @@ func (r *LLMContextRenderer) renderArchPattern(snapshot *facts.Snapshot) string 
 
 	sb.WriteString("_No specific architecture pattern detected._\n\n")
 	return sb.String()
+}
+
+// renderCrossRepo surfaces the cross-repo "graph of graphs": one row per
+// consumer→provider dependency synthesized by the crossrepo linker. It renders
+// regardless of which explainers are enabled, so multi-repo dependencies are
+// always visible in the context an agent reads. Returns "" when there are none
+// (i.e. single-repo snapshots).
+func (r *LLMContextRenderer) renderCrossRepo(snapshot *facts.Snapshot) string {
+	var edges []facts.Fact
+	for _, f := range snapshot.Facts {
+		if f.Kind == facts.KindDependency && propStr(f, "type") == "cross_repo" {
+			edges = append(edges, f)
+		}
+	}
+	if len(edges) == 0 {
+		return ""
+	}
+
+	sort.Slice(edges, func(i, j int) bool { return edges[i].Name < edges[j].Name })
+
+	var sb strings.Builder
+	sb.WriteString("## Cross-Repo Dependencies\n\n")
+	sb.WriteString("How requests and code flow between repositories. Traverse from a repo label " +
+		"(service node) to follow these edges.\n\n")
+	sb.WriteString("| Consumer | Provider | Via | Detail |\n")
+	sb.WriteString("|----------|----------|-----|--------|\n")
+	for _, e := range edges {
+		consumer := e.Repo
+		provider := consumer
+		for _, rel := range e.Relations {
+			if rel.Kind == facts.RelDependsOn {
+				provider = rel.Target
+			}
+		}
+		// The provider also lives in the edge name ("consumer -> provider") for
+		// facts loaded from JSONL where relations may be absent.
+		if provider == consumer {
+			if i := strings.Index(e.Name, " -> "); i >= 0 {
+				provider = e.Name[i+4:]
+			}
+		}
+		via := strings.Join(propStrSlice(e, "via"), "+")
+		sb.WriteString(fmt.Sprintf("| `%s` | `%s` | %s | %s |\n", consumer, provider, via, crossRepoDetail(e)))
+	}
+	sb.WriteString("\n")
+	return sb.String()
+}
+
+// crossRepoDetail renders the evidence behind an edge: endpoint/import counts
+// plus a few samples.
+func crossRepoDetail(e facts.Fact) string {
+	var parts []string
+	if n := propInt(e, "endpoint_count"); n > 0 {
+		parts = append(parts, fmt.Sprintf("%d endpoint(s): %s", n, samplePreview(propStrSlice(e, "endpoints"))))
+	}
+	if n := propInt(e, "import_count"); n > 0 {
+		parts = append(parts, fmt.Sprintf("%d import(s): %s", n, samplePreview(propStrSlice(e, "import_samples"))))
+	}
+	if len(parts) == 0 {
+		return "cross-repo dependency"
+	}
+	return strings.Join(parts, "; ")
+}
+
+// samplePreview joins up to three samples, appending "…" when truncated.
+func samplePreview(ss []string) string {
+	if len(ss) <= 3 {
+		return strings.Join(ss, ", ")
+	}
+	return strings.Join(ss[:3], ", ") + ", …"
 }
 
 func (r *LLMContextRenderer) renderEntryPoints(snapshot *facts.Snapshot) string {
@@ -512,6 +583,50 @@ func detectDominantLanguage(snapshot *facts.Snapshot) string {
 		}
 	}
 	return best
+}
+
+func propStr(f facts.Fact, key string) string {
+	if f.Props == nil {
+		return ""
+	}
+	s, _ := f.Props[key].(string)
+	return s
+}
+
+// propInt reads an int-valued prop, tolerating the float64 form produced by a
+// JSON (facts.jsonl) round-trip.
+func propInt(f facts.Fact, key string) int {
+	if f.Props == nil {
+		return 0
+	}
+	switch v := f.Props[key].(type) {
+	case int:
+		return v
+	case float64:
+		return int(v)
+	}
+	return 0
+}
+
+// propStrSlice reads a string-slice prop, tolerating the []interface{} form
+// produced by a JSON round-trip.
+func propStrSlice(f facts.Fact, key string) []string {
+	if f.Props == nil {
+		return nil
+	}
+	switch v := f.Props[key].(type) {
+	case []string:
+		return v
+	case []interface{}:
+		out := make([]string, 0, len(v))
+		for _, e := range v {
+			if s, ok := e.(string); ok {
+				out = append(out, s)
+			}
+		}
+		return out
+	}
+	return nil
 }
 
 func filterByKind(ff []facts.Fact, kind string) []facts.Fact {

@@ -60,6 +60,7 @@ extractors:
 explainers:
   - cycles
   - layers
+  - crossrepo
 renderers:
   - llm_context
 output:

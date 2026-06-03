@@ -123,6 +123,58 @@ func TestRender_EmptySnapshot(t *testing.T) {
 	}
 }
 
+func TestCrossRepo_RendersDependencyTable(t *testing.T) {
+	ff := []facts.Fact{
+		{Kind: facts.KindService, Name: "svc-pricing", Repo: "svc-pricing",
+			Relations: []facts.Relation{{Kind: facts.RelDependsOn, Target: "svc-catalogue"}}},
+		{Kind: facts.KindService, Name: "svc-catalogue", Repo: "svc-catalogue"},
+		{Kind: facts.KindDependency, Name: "svc-pricing -> svc-catalogue", Repo: "svc-pricing",
+			Props: map[string]any{
+				"type": "cross_repo", "via": []string{"http"},
+				"endpoint_count": 1, "endpoints": []string{"GET /api/items/{id}"},
+			}},
+		{Kind: facts.KindDependency, Name: "svc-pricing -> core", Repo: "svc-pricing",
+			Props: map[string]any{
+				"type": "cross_repo", "via": []string{"import"},
+				"import_count": 1, "import_samples": []string{"core/money/converter"},
+			}},
+	}
+	content := string(mustRender(t, makeSnapshot(ff, nil)))
+
+	if !strings.Contains(content, "## Cross-Repo Dependencies") {
+		t.Fatalf("missing Cross-Repo Dependencies section:\n%s", content)
+	}
+	for _, want := range []string{
+		"`svc-pricing` | `svc-catalogue` | http",
+		"GET /api/items/{id}",
+		"`svc-pricing` | `core` | import",
+		"core/money/converter",
+	} {
+		if !strings.Contains(content, want) {
+			t.Errorf("cross-repo table missing %q in:\n%s", want, content)
+		}
+	}
+}
+
+func TestCrossRepo_OmittedWhenNoEdges(t *testing.T) {
+	content := string(mustRender(t, makeSnapshot([]facts.Fact{{Kind: facts.KindModule, Name: "m"}}, nil)))
+	if strings.Contains(content, "Cross-Repo Dependencies") {
+		t.Errorf("cross-repo section should be omitted for single-repo snapshots:\n%s", content)
+	}
+}
+
+func mustRender(t *testing.T, snapshot *facts.Snapshot) []byte {
+	t.Helper()
+	artifacts, err := New(16000).Render(context.Background(), snapshot)
+	if err != nil {
+		t.Fatalf("Render: %v", err)
+	}
+	if len(artifacts) != 1 {
+		t.Fatalf("expected 1 artifact, got %d", len(artifacts))
+	}
+	return artifacts[0].Content
+}
+
 func TestRiskZones_IncludesCyclesAndViolations(t *testing.T) {
 	insights := []facts.Insight{
 		{Title: "Architecture pattern: hexagonal", Confidence: 0.8, Description: "Detected hexagonal"},

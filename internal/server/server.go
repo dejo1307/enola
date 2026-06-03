@@ -54,7 +54,7 @@ type generateSnapshotArgs struct {
 
 // queryFactsArgs are the arguments for the query_facts tool.
 type queryFactsArgs struct {
-	Kind      string `json:"kind,omitempty" jsonschema:"Filter by fact kind: module, symbol, route, storage, or dependency"`
+	Kind      string `json:"kind,omitempty" jsonschema:"Filter by fact kind: module, symbol, route, storage, dependency, or service (service = a whole repo, used as a node in the cross-repo graph)"`
 	File      string `json:"file,omitempty" jsonschema:"Filter by file path"`
 	Name      string `json:"name,omitempty" jsonschema:"Filter by name using substring match"`
 	Relation  string `json:"relation,omitempty" jsonschema:"Filter by relation kind: declares, imports, calls, implements, or depends_on"`
@@ -188,6 +188,18 @@ func (s *Server) registerTools() {
 					"- File paths are prefixed: e.g. %s/src/...\n"+
 					"- Generate additional repos with append=true (sequentially, not in parallel).",
 				autoNote, repoLabel, repoLabel, repoLabel,
+			)
+
+			// Report the cross-repo "graph of graphs" links derived from this set.
+			crossEdges, _ := s.eng.Store().QueryAdvanced(facts.QueryOpts{
+				Kind: facts.KindDependency, Prop: "type", PropValue: "cross_repo", Limit: 500,
+			})
+			services := s.eng.Store().ByKind(facts.KindService)
+			summary += fmt.Sprintf(
+				"\n- **Cross-repo graph:** %d service node(s), %d cross-repo dependency edge(s). "+
+					"Traverse between repos with traverse(start=%q) / find_path, list edges with "+
+					"query_facts(kind=\"service\") or query_facts(prop=\"type\", prop_value=\"cross_repo\").",
+				len(services), len(crossEdges), repoLabel,
 			)
 		}
 

@@ -532,6 +532,52 @@ func (s *Store) TagUntagged(repo, filePrefix string) int {
 	return count
 }
 
+// RemoveWhere removes every fact for which pred returns true and rebuilds all
+// indices from the surviving facts. The graph index is invalidated (set to nil)
+// because removing facts shifts slice positions; callers should rebuild it via
+// BuildGraph afterwards. Returns the number of facts removed.
+//
+// This is used to drop previously-synthesized facts (e.g. cross-repo links)
+// before recomputing them, so repeated append/link cycles stay idempotent.
+func (s *Store) RemoveWhere(pred func(Fact) bool) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	kept := s.facts[:0:0]
+	removed := 0
+	for _, f := range s.facts {
+		if pred(f) {
+			removed++
+			continue
+		}
+		kept = append(kept, f)
+	}
+	if removed == 0 {
+		return 0
+	}
+
+	// Rebuild facts slice and all indices from scratch.
+	s.facts = kept
+	s.byKind = make(map[string][]int)
+	s.byFile = make(map[string][]int)
+	s.byName = make(map[string][]int)
+	s.byRepo = make(map[string][]int)
+	for idx, f := range s.facts {
+		s.byKind[f.Kind] = append(s.byKind[f.Kind], idx)
+		if f.File != "" {
+			s.byFile[f.File] = append(s.byFile[f.File], idx)
+		}
+		if f.Name != "" {
+			s.byName[f.Name] = append(s.byName[f.Name], idx)
+		}
+		if f.Repo != "" {
+			s.byRepo[f.Repo] = append(s.byRepo[f.Repo], idx)
+		}
+	}
+	s.graph = nil
+	return removed
+}
+
 // Modules returns all module facts.
 func (s *Store) Modules() []Fact {
 	return s.ByKind(KindModule)
