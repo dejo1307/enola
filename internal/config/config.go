@@ -41,7 +41,7 @@ func Default() *Config {
 			".enola/**",
 		},
 		Extractors: []string{"go", "kotlin", "openapi", "python", "typescript", "swift", "ruby"},
-		Explainers: []string{"cycles", "layers"},
+		Explainers: []string{"cycles", "layers", "crossrepo"},
 		Renderers:  []string{"llm_context"},
 		Output: OutputConfig{
 			Dir:              ".enola",

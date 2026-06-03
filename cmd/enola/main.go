@@ -9,6 +9,7 @@ import (
 
 	"github.com/dejo1307/enola/internal/config"
 	"github.com/dejo1307/enola/internal/engine"
+	crossrepoexp "github.com/dejo1307/enola/internal/explainers/crossrepo"
 	"github.com/dejo1307/enola/internal/explainers/cycles"
 	"github.com/dejo1307/enola/internal/explainers/layers"
 	"github.com/dejo1307/enola/internal/extractors/goextractor"
@@ -70,6 +71,7 @@ func main() {
 
 	eng.RegisterExplainer(cycles.New())
 	eng.RegisterExplainer(layers.New())
+	eng.RegisterExplainer(crossrepoexp.New())
 
 	eng.RegisterRenderer(llmcontext.New(cfg.Output.MaxContextTokens))
 

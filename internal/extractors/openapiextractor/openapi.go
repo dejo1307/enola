@@ -105,7 +105,7 @@ type openAPISpec struct {
 // openAPIInfo captures the info block, including custom gateway config extensions.
 type openAPIInfo struct {
 	// x-gateway-config is a custom extension that configures the API Gateway.
-	// Example: { at-gateway-prefix: "/svc-navigation" }
+	// Example: { at-gateway-prefix: "/svc-example" }
 	GatewayConfig map[string]interface{} `yaml:"x-gateway-config"`
 }
 

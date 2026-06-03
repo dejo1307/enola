@@ -288,6 +288,46 @@ Or filter to a specific repo:
 
 The `show_symbol` and `explore` tools automatically resolve file paths across repos, so source code viewing works seamlessly in multi-repo mode.
 
+### The Graph of Graphs
+
+Appending several repos does more than co-locate their facts — enola also **links them into a single
+cross-repo graph**. After each append, a linking pass connects the per-repo graphs using two signals
+the extractors already capture:
+
+- **HTTP route role matching** — a route a repo *calls* (`role:"client"`, from generated OpenAPI
+  clients) is matched to a route another repo *serves* (`role:"server"` or a framework route) by
+  normalized path + method. The caller is recorded as depending on the servee.
+- **Import / shared-lib references** — an import whose `@scope`/leading segment names another loaded
+  repo (e.g. `@app-web/lib-api`, `lib-core/money`) records a dependency on that repo.
+
+These become real facts you can query and traverse:
+
+- A `service` node per repo (`query_facts(kind="service")`), named by its repo label.
+- A `cross_repo` dependency edge per `consumer → provider` pair, carrying the matched endpoints and
+  import samples (`query_facts(prop="type", prop_value="cross_repo")`).
+
+Because they are ordinary graph nodes/edges, the traversal tools become cross-repo aware with no
+extra steps:
+
+> "Traverse from svc-alpha — which services does it depend on?"
+> `traverse(start="svc-alpha")` now reaches `svc-beta`, `lib-core`, …
+
+> "What is the path from app-web to svc-beta?"
+> `find_path(from="app-web", to="svc-beta")`
+
+> "If I change svc-beta, which services are impacted?"
+> `impact_analysis(target="svc-beta")` lists the dependent services.
+
+The link set is recomputed from scratch on every append, so it always reflects exactly the repos
+currently loaded. The cross-repo dependencies also appear as a **Cross-Repo Dependencies** section in
+the generated `llm_context.md`, so an agent reading the snapshot resource sees them without running
+any tool.
+
+> **Config note:** the `crossrepo` explainer (which adds a cross-repo entry to `insights.json`) must
+> be listed under `explainers:` in your config — the bundled `examples/*.yaml` already include it. The
+> service nodes, graph edges, traversal, and the `llm_context.md` section work regardless of explainer
+> config; only the `insights.json` entry depends on it.
+
 ## Output Artifacts
 
 After running `generate_snapshot`, the following files are written to the output directory (default `.enola/`):

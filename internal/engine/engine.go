@@ -19,6 +19,7 @@ import (
 	"github.com/dejo1307/enola/internal/explainers"
 	"github.com/dejo1307/enola/internal/extractors"
 	"github.com/dejo1307/enola/internal/facts"
+	"github.com/dejo1307/enola/internal/linkers/crossrepo"
 	"github.com/dejo1307/enola/internal/renderers"
 )
 
@@ -194,7 +195,13 @@ func (e *Engine) GenerateSnapshot(ctx context.Context, repoPath string, appendMo
 		log.Printf("[engine] prefixed %d facts with repo label %q", newCount-preCount, repoLabel)
 	}
 
-	// 3b. Build graph index for traversal queries
+	// 3b. Link repos into a cross-repo "graph of graphs": derive service-level
+	// nodes and consumer→provider edges from HTTP route role matching and
+	// import/shared-lib references. Recomputed from scratch each run (prior
+	// synthetic facts are dropped first) so it stays idempotent across appends.
+	e.linkCrossRepo()
+
+	// 3c. Build graph index for traversal queries
 	e.store.BuildGraph()
 	log.Printf("[engine] built graph index (%d nodes, %d edges)", e.store.Graph().NodeCount(), e.store.Graph().EdgeCount())
 
@@ -244,6 +251,35 @@ func (e *Engine) GenerateSnapshot(ctx context.Context, repoPath string, appendMo
 	e.snapshot = snapshot
 	log.Printf("[engine] snapshot generated in %s", duration)
 	return snapshot, nil
+}
+
+// linkCrossRepo drops any previously-synthesized cross-repo facts and recomputes
+// them over the full fact set, adding service nodes and consumer→provider edges.
+// It is a no-op for single-repo snapshots (no cross-repo matches exist).
+func (e *Engine) linkCrossRepo() {
+	e.store.RemoveWhere(func(f facts.Fact) bool {
+		if f.Props == nil {
+			return false
+		}
+		return f.Props["synthetic"] == crossrepo.SyntheticMarker
+	})
+
+	links := crossrepo.ComputeLinks(e.store.All())
+	if len(links) == 0 {
+		return
+	}
+	e.store.Add(links...)
+
+	services, edges := 0, 0
+	for _, f := range links {
+		switch f.Kind {
+		case facts.KindService:
+			services++
+		case facts.KindDependency:
+			edges++
+		}
+	}
+	log.Printf("[engine] cross-repo links: %d service nodes, %d dependency edges", services, edges)
 }
 
 // walkRepo collects all files in the repo, applying ignore patterns.

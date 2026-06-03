@@ -1029,18 +1029,18 @@ func TestShowSymbol_PrefersExactMatch(t *testing.T) {
 // --- resolveNodeName / nameResolution tests ---
 
 // populateAmbiguousStore builds a store with several modules that share the
-// "svc-catalogue" prefix plus a symbol, modeling the real-world ambiguity the
+// "svc-beta" prefix plus a symbol, modeling the real-world ambiguity the
 // resolution object addresses.
 func populateAmbiguousStore() *facts.Store {
 	store := facts.NewStore()
 	store.Add(
-		facts.Fact{Kind: facts.KindModule, Name: "cmd/svc-catalogue", Props: map[string]any{"language": "go"}},
-		facts.Fact{Kind: facts.KindModule, Name: "cmd/svc-catalogue-consumer", Props: map[string]any{"language": "go"}},
-		facts.Fact{Kind: facts.KindModule, Name: "cmd/svc-catalogue-asynq", Props: map[string]any{"language": "go"}},
-		facts.Fact{Kind: facts.KindModule, Name: "cmd/svc-catalogue-filters", Props: map[string]any{"language": "go"}},
-		facts.Fact{Kind: facts.KindModule, Name: "cmd/svc-catalogue-task", Props: map[string]any{"language": "go"}},
-		facts.Fact{Kind: facts.KindSymbol, Name: "cmd/svc-catalogue-asynq.jobServerResources",
-			File: "cmd/svc-catalogue-asynq/main.go", Line: 12,
+		facts.Fact{Kind: facts.KindModule, Name: "cmd/svc-beta", Props: map[string]any{"language": "go"}},
+		facts.Fact{Kind: facts.KindModule, Name: "cmd/svc-beta-consumer", Props: map[string]any{"language": "go"}},
+		facts.Fact{Kind: facts.KindModule, Name: "cmd/svc-beta-asynq", Props: map[string]any{"language": "go"}},
+		facts.Fact{Kind: facts.KindModule, Name: "cmd/svc-beta-filters", Props: map[string]any{"language": "go"}},
+		facts.Fact{Kind: facts.KindModule, Name: "cmd/svc-beta-task", Props: map[string]any{"language": "go"}},
+		facts.Fact{Kind: facts.KindSymbol, Name: "cmd/svc-beta-asynq.jobServerResources",
+			File: "cmd/svc-beta-asynq/main.go", Line: 12,
 			Props: map[string]any{"symbol_kind": "function", "language": "go"}},
 	)
 	return store
@@ -1139,7 +1139,7 @@ func TestResolveNodeName_OverThreshold(t *testing.T) {
 	store := populateAmbiguousStore()
 	srv := newTestServer(store)
 
-	name, res, err := srv.resolveNodeName(store, "svc-catalogue")
+	name, res, err := srv.resolveNodeName(store, "svc-beta")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1155,8 +1155,8 @@ func TestResolveNodeName_OverThreshold(t *testing.T) {
 	if !res.Ambiguous {
 		t.Error("resolution should be marked ambiguous")
 	}
-	if res.Query != "svc-catalogue" {
-		t.Errorf("resolution.Query = %q, want svc-catalogue", res.Query)
+	if res.Query != "svc-beta" {
+		t.Errorf("resolution.Query = %q, want svc-beta", res.Query)
 	}
 	if len(res.Alternatives) < ambiguousMatchThreshold {
 		t.Errorf("expected at least %d alternatives, got %v", ambiguousMatchThreshold, res.Alternatives)
@@ -1215,13 +1215,13 @@ func itoa(n int) string {
 func TestTraverseResponse_MarshalWithResolution(t *testing.T) {
 	resp := traverseResponse{
 		Resolution: &nameResolution{
-			Query:        "svc-catalogue",
-			Matched:      "cmd/svc-catalogue",
-			Alternatives: []string{"cmd/svc-catalogue-asynq"},
+			Query:        "svc-beta",
+			Matched:      "cmd/svc-beta",
+			Alternatives: []string{"cmd/svc-beta-asynq"},
 			Ambiguous:    true,
 		},
 		TraversalResult: facts.TraversalResult{
-			Nodes: []facts.TraversalNode{{Name: "cmd/svc-catalogue", Kind: "module"}},
+			Nodes: []facts.TraversalNode{{Name: "cmd/svc-beta", Kind: "module"}},
 			Edges: []facts.TraversalEdge{},
 		},
 	}
@@ -1254,7 +1254,7 @@ func TestTraverseResponse_MarshalOmitsResolutionWhenNil(t *testing.T) {
 
 func TestTraverseResponse_MarshalOverThresholdEmptyArrays(t *testing.T) {
 	resp := traverseResponse{
-		Resolution: &nameResolution{Query: "svc-catalogue", Ambiguous: true},
+		Resolution: &nameResolution{Query: "svc-beta", Ambiguous: true},
 		TraversalResult: facts.TraversalResult{
 			Nodes: []facts.TraversalNode{},
 			Edges: []facts.TraversalEdge{},
@@ -1278,7 +1278,7 @@ func TestTraverseResponse_MarshalOverThresholdEmptyArrays(t *testing.T) {
 
 func TestFindPathResponse_MarshalIndependentResolutions(t *testing.T) {
 	resp := findPathResponse{
-		FromResolution: &nameResolution{Query: "svc-catalogue", Ambiguous: true},
+		FromResolution: &nameResolution{Query: "svc-beta", Ambiguous: true},
 		PathResult:     facts.PathResult{From: "", To: "internal/facts", Found: false},
 	}
 	data, err := json.MarshalIndent(resp, "", "  ")

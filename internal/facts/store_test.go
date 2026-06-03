@@ -303,6 +303,76 @@ func TestClear_ResetsIndexes(t *testing.T) {
 	}
 }
 
+func TestRemoveWhere_FiltersAndRebuildsIndices(t *testing.T) {
+	s := NewStore()
+	s.Add(
+		Fact{Kind: KindSymbol, Name: "Foo", File: "a.go", Repo: "repoA"},
+		Fact{Kind: KindService, Name: "repoA", Repo: "repoA", Props: map[string]any{"synthetic": "crossrepo"}},
+		Fact{Kind: KindDependency, Name: "repoA -> repoB", Repo: "repoA", Props: map[string]any{"synthetic": "crossrepo"}},
+		Fact{Kind: KindModule, Name: "mod", File: "b.go", Repo: "repoB"},
+	)
+
+	removed := s.RemoveWhere(func(f Fact) bool { return f.Props["synthetic"] == "crossrepo" })
+	if removed != 2 {
+		t.Fatalf("removed = %d, want 2", removed)
+	}
+	if s.Count() != 2 {
+		t.Fatalf("post-remove Count() = %d, want 2", s.Count())
+	}
+
+	// Survivors are still indexed correctly.
+	if got := s.ByName("Foo"); len(got) != 1 {
+		t.Errorf("ByName(Foo) = %d, want 1", len(got))
+	}
+	if got := s.ByKind(KindModule); len(got) != 1 || got[0].Name != "mod" {
+		t.Errorf("ByKind(module) = %+v, want [mod]", got)
+	}
+	if got := s.ByRepo("repoB"); len(got) != 1 {
+		t.Errorf("ByRepo(repoB) = %d, want 1", len(got))
+	}
+
+	// Removed facts are gone from all indices.
+	if got := s.ByKind(KindService); len(got) != 0 {
+		t.Errorf("ByKind(service) = %d, want 0", len(got))
+	}
+	if got := s.ByName("repoA -> repoB"); len(got) != 0 {
+		t.Errorf("ByName(cross-repo dep) = %d, want 0", len(got))
+	}
+	if got := s.ByRepo("repoA"); len(got) != 1 { // only "Foo" remains in repoA
+		t.Errorf("ByRepo(repoA) = %d, want 1", len(got))
+	}
+
+	// Graph is invalidated by removal.
+	if s.Graph() != nil {
+		t.Errorf("Graph() = non-nil after RemoveWhere, want nil")
+	}
+
+	// Idempotent: re-adding synthetic facts then removing again is stable.
+	s.Add(Fact{Kind: KindService, Name: "repoB", Repo: "repoB", Props: map[string]any{"synthetic": "crossrepo"}})
+	if again := s.RemoveWhere(func(f Fact) bool { return f.Props["synthetic"] == "crossrepo" }); again != 1 {
+		t.Errorf("second remove = %d, want 1", again)
+	}
+	if s.Count() != 2 {
+		t.Errorf("final Count() = %d, want 2", s.Count())
+	}
+}
+
+func TestRemoveWhere_NoMatchIsNoOp(t *testing.T) {
+	s := NewStore()
+	s.Add(makeFact(KindSymbol, "Foo", "a.go"))
+	s.BuildGraph()
+	if removed := s.RemoveWhere(func(f Fact) bool { return false }); removed != 0 {
+		t.Errorf("removed = %d, want 0", removed)
+	}
+	if s.Count() != 1 {
+		t.Errorf("Count() = %d, want 1", s.Count())
+	}
+	// A no-op must preserve the existing graph (no rebuild needed).
+	if s.Graph() == nil {
+		t.Errorf("Graph() = nil after no-op RemoveWhere, want preserved")
+	}
+}
+
 // --- QueryAdvanced tests ---
 
 func TestQueryAdvanced_MultiKind(t *testing.T) {

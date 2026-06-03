@@ -649,7 +649,7 @@ class Foo:
 	}
 }
 
-// TestExtractFile_RealWorldFastAPI exercises patterns from svc-recommender:
+// TestExtractFile_RealWorldFastAPI exercises patterns from svc-example:
 // multiple imports, a router variable assignment, and a multi-param async handler.
 func TestExtractFile_RealWorldFastAPI(t *testing.T) {
 	src := `import logging
