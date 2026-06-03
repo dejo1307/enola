@@ -408,7 +408,7 @@ func (s *Server) registerTools() {
 				continue
 			}
 
-				lang := "go"
+			lang := "go"
 			if l, ok := fact.Props["language"].(string); ok && l != "" {
 				lang = l
 			}
@@ -491,9 +491,19 @@ func (s *Server) registerTools() {
 		}
 
 		// Resolve start name: try exact match first, then substring
-		startName, err := s.resolveNodeName(store, args.Start)
+		startName, res, err := s.resolveNodeName(store, args.Start)
 		if err != nil {
 			return errorResult(err.Error()), nil, nil
+		}
+		// Over threshold: refuse to guess; return resolution with empty results.
+		if res != nil && res.Matched == "" {
+			return jsonResult(traverseResponse{
+				Resolution: res,
+				TraversalResult: facts.TraversalResult{
+					Nodes: []facts.TraversalNode{},
+					Edges: []facts.TraversalEdge{},
+				},
+			})
 		}
 
 		direction := args.Direction
@@ -506,15 +516,7 @@ func (s *Server) registerTools() {
 
 		result := graph.Traverse(startName, direction, args.RelationKinds, args.NodeKinds, args.MaxDepth, args.MaxNodes)
 
-		data, err := json.MarshalIndent(result, "", "  ")
-		if err != nil {
-			return errorResult(fmt.Sprintf("failed to marshal results: %v", err)), nil, nil
-		}
-		return &mcp.CallToolResult{
-			Content: []mcp.Content{
-				&mcp.TextContent{Text: string(data)},
-			},
-		}, nil, nil
+		return jsonResult(traverseResponse{Resolution: res, TraversalResult: result})
 	})
 
 	// Tool: find_path
@@ -535,26 +537,31 @@ func (s *Server) registerTools() {
 			return errorResult("both 'from' and 'to' are required"), nil, nil
 		}
 
-		fromName, err := s.resolveNodeName(store, args.From)
+		fromName, fromRes, err := s.resolveNodeName(store, args.From)
 		if err != nil {
 			return errorResult(fmt.Sprintf("from: %v", err)), nil, nil
 		}
-		toName, err := s.resolveNodeName(store, args.To)
+		toName, toRes, err := s.resolveNodeName(store, args.To)
 		if err != nil {
 			return errorResult(fmt.Sprintf("to: %v", err)), nil, nil
+		}
+		// If either endpoint was too ambiguous to resolve, refuse to guess and
+		// return the resolution(s) with an empty path.
+		if (fromRes != nil && fromRes.Matched == "") || (toRes != nil && toRes.Matched == "") {
+			return jsonResult(findPathResponse{
+				FromResolution: fromRes,
+				ToResolution:   toRes,
+				PathResult:     facts.PathResult{From: fromName, To: toName, Found: false},
+			})
 		}
 
 		result := graph.FindPath(fromName, toName, args.RelationKinds, args.MaxDepth)
 
-		data, err := json.MarshalIndent(result, "", "  ")
-		if err != nil {
-			return errorResult(fmt.Sprintf("failed to marshal results: %v", err)), nil, nil
-		}
-		return &mcp.CallToolResult{
-			Content: []mcp.Content{
-				&mcp.TextContent{Text: string(data)},
-			},
-		}, nil, nil
+		return jsonResult(findPathResponse{
+			FromResolution: fromRes,
+			ToResolution:   toRes,
+			PathResult:     result,
+		})
 	})
 
 	// Tool: impact_analysis
@@ -575,51 +582,85 @@ func (s *Server) registerTools() {
 			return errorResult("target is required"), nil, nil
 		}
 
-		targetName, err := s.resolveNodeName(store, args.Target)
+		targetName, res, err := s.resolveNodeName(store, args.Target)
 		if err != nil {
 			return errorResult(err.Error()), nil, nil
+		}
+		// Over threshold: refuse to guess; return resolution with empty results.
+		if res != nil && res.Matched == "" {
+			return jsonResult(impactResponse{
+				Resolution: res,
+				ImpactResult: facts.ImpactResult{
+					Target:  args.Target,
+					ByDepth: map[int][]facts.TraversalNode{},
+					Edges:   []facts.TraversalEdge{},
+				},
+			})
 		}
 
 		result := graph.ImpactSet(targetName, args.MaxDepth, args.MaxNodes, args.IncludeForward)
 
-		data, err := json.MarshalIndent(result, "", "  ")
-		if err != nil {
-			return errorResult(fmt.Sprintf("failed to marshal results: %v", err)), nil, nil
-		}
-		return &mcp.CallToolResult{
-			Content: []mcp.Content{
-				&mcp.TextContent{Text: string(data)},
-			},
-		}, nil, nil
+		return jsonResult(impactResponse{Resolution: res, ImpactResult: result})
 	})
 }
 
+// ambiguousMatchThreshold is the candidate count at or above which
+// resolveNodeName refuses to guess and forces the caller to re-invoke with an
+// exact name.
+const ambiguousMatchThreshold = 3
+
+// maxAlternatives caps how many candidate names are echoed back in a
+// nameResolution so the response stays readable.
+const maxAlternatives = 10
+
+// nameResolution reports how a user-provided name was resolved to a concrete
+// fact name. It is surfaced in tool responses ONLY when the input matched more
+// than one fact (i.e. Ambiguous is true), so callers can detect and correct a
+// possibly-wrong pick. Matched is empty when the match count crossed
+// ambiguousMatchThreshold and the caller must re-invoke with an exact name.
+type nameResolution struct {
+	Query        string   `json:"query"`
+	Matched      string   `json:"matched,omitempty"`
+	Alternatives []string `json:"alternatives,omitempty"`
+	Ambiguous    bool     `json:"ambiguous"`
+}
+
 // resolveNodeName resolves a user-provided name to an exact fact name.
-// It tries exact match first, then substring match with smart disambiguation
-// that prefers struct/class/interface definitions over their methods.
-func (s *Server) resolveNodeName(store *facts.Store, input string) (string, error) {
+//
+// It returns the resolved name and, when resolution was ambiguous (the input
+// substring-matched more than one fact and no confident pick existed), a
+// non-nil *nameResolution describing the ambiguity. For exact matches, single
+// substring matches, and confident suffix-exact matches the resolution is nil.
+//
+// When the candidate count reaches ambiguousMatchThreshold the method refuses
+// to guess: it returns an empty name together with a resolution whose Matched
+// is empty, signalling the caller to emit a resolution-only response and
+// require an exact re-invocation.
+func (s *Server) resolveNodeName(store *facts.Store, input string) (string, *nameResolution, error) {
+	query := input
 	input = s.normalizeToRelative(input)
 
 	// Try exact match first
 	exact := store.LookupByExactName(input)
 	if len(exact) > 0 {
-		return exact[0].Name, nil
+		return exact[0].Name, nil, nil
 	}
 
 	// Try substring match
 	results := store.Query("", "", input, "")
 	if len(results) == 0 {
-		return "", fmt.Errorf("no facts matching %q", input)
+		return "", nil, fmt.Errorf("no facts matching %q", input)
 	}
 	if len(results) == 1 {
-		return results[0].Name, nil
+		return results[0].Name, nil, nil
 	}
 
 	// Smart disambiguation: when multiple matches exist, try to find the
 	// most likely intended target rather than immediately erroring.
 
 	// 1. Prefer exact name suffix match (e.g., "AuthHandler" matching
-	//    "adapters.AuthHandler" over "adapters.AuthHandler.Login")
+	//    "adapters.AuthHandler" over "adapters.AuthHandler.Login"). A unique
+	//    suffix-exact match is a confident pick, so no resolution is surfaced.
 	var suffixMatches []facts.Fact
 	for _, r := range results {
 		parts := strings.Split(r.Name, ".")
@@ -628,40 +669,68 @@ func (s *Server) resolveNodeName(store *facts.Store, input string) (string, erro
 		}
 	}
 	if len(suffixMatches) == 1 {
-		return suffixMatches[0].Name, nil
+		return suffixMatches[0].Name, nil, nil
 	}
+
+	// Beyond this point the pick is a heuristic guess, so the result is
+	// ambiguous. If the candidate count crosses the threshold, refuse to guess
+	// and force an exact re-invocation.
+	if len(results) >= ambiguousMatchThreshold {
+		return "", &nameResolution{
+			Query:        query,
+			Alternatives: candidateNames(results, ""),
+			Ambiguous:    true,
+		}, nil
+	}
+
+	// Below threshold: pick the most likely candidate but flag the ambiguity.
 
 	// 2. Among suffix matches (or all results), prefer struct/class/interface
 	candidates := results
 	if len(suffixMatches) > 0 {
 		candidates = suffixMatches
 	}
+	matched := results[0].Name
 	for _, r := range candidates {
 		sk, _ := r.Props["symbol_kind"].(string)
 		if sk == "struct" || sk == "class" || sk == "interface" {
-			return r.Name, nil
+			matched = r.Name
+			break
 		}
 	}
-
-	// 3. Prefer module-level facts over symbol-level
-	for _, r := range candidates {
-		if r.Kind == facts.KindModule {
-			return r.Name, nil
-		}
-	}
-
-	// 4. If still ambiguous beyond threshold, report error with guidance
-	if len(results) > 10 {
-		names := make([]string, 0, 5)
-		for i, r := range results {
-			if i >= 5 {
+	// 3. Prefer module-level facts over symbol-level (only if no struct/class/
+	//    interface was chosen above).
+	if matched == results[0].Name {
+		for _, r := range candidates {
+			if r.Kind == facts.KindModule {
+				matched = r.Name
 				break
 			}
-			names = append(names, r.Name)
 		}
-		return "", fmt.Errorf("ambiguous name %q matches %d facts (e.g. %s). Use a fully qualified name or filter by prop=symbol_kind", input, len(results), strings.Join(names, ", "))
 	}
-	return results[0].Name, nil
+
+	return matched, &nameResolution{
+		Query:        query,
+		Matched:      matched,
+		Alternatives: candidateNames(results, matched),
+		Ambiguous:    true,
+	}, nil
+}
+
+// candidateNames collects up to maxAlternatives fact names from results,
+// preserving store order and excluding exclude (the chosen match) when set.
+func candidateNames(results []facts.Fact, exclude string) []string {
+	names := make([]string, 0, len(results))
+	for _, r := range results {
+		if r.Name == exclude {
+			continue
+		}
+		names = append(names, r.Name)
+		if len(names) >= maxAlternatives {
+			break
+		}
+	}
+	return names
 }
 
 // exploreArgs are the arguments for the explore tool.
@@ -1233,4 +1302,39 @@ func errorResult(msg string) *mcp.CallToolResult {
 		},
 		IsError: true,
 	}
+}
+
+// jsonResult marshals v as indented JSON into a tool result, returning an error
+// result if marshaling fails.
+func jsonResult(v any) (*mcp.CallToolResult, any, error) {
+	data, err := json.MarshalIndent(v, "", "  ")
+	if err != nil {
+		return errorResult(fmt.Sprintf("failed to marshal results: %v", err)), nil, nil
+	}
+	return &mcp.CallToolResult{
+		Content: []mcp.Content{
+			&mcp.TextContent{Text: string(data)},
+		},
+	}, nil, nil
+}
+
+// traverseResponse wraps a graph traversal with the optional name resolution.
+// The embedded TraversalResult inlines nodes/edges/stats alongside resolution.
+type traverseResponse struct {
+	Resolution *nameResolution `json:"resolution,omitempty"`
+	facts.TraversalResult
+}
+
+// impactResponse wraps an impact analysis with the optional name resolution.
+type impactResponse struct {
+	Resolution *nameResolution `json:"resolution,omitempty"`
+	facts.ImpactResult
+}
+
+// findPathResponse wraps a shortest-path result. find_path resolves two names,
+// so it carries one resolution per side.
+type findPathResponse struct {
+	FromResolution *nameResolution `json:"from_resolution,omitempty"`
+	ToResolution   *nameResolution `json:"to_resolution,omitempty"`
+	facts.PathResult
 }

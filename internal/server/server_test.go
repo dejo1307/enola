@@ -1,6 +1,7 @@
 package server
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -995,7 +996,7 @@ func TestShowSymbol_PrefersExactMatch(t *testing.T) {
 			Props: map[string]any{"symbol_kind": "interface", "language": "ruby"}},
 		// A non-symbol fact named "Transaction" should be ignored.
 		facts.Fact{Kind: facts.KindStorage, Name: "Transaction",
-			File: "models/transaction.rb",
+			File:  "models/transaction.rb",
 			Props: map[string]any{"storage_kind": "model"}},
 	)
 
@@ -1022,6 +1023,274 @@ func TestShowSymbol_PrefersExactMatch(t *testing.T) {
 	substring := store.Query("symbol", "", "Transaction", "")
 	if len(substring) < 2 {
 		t.Errorf("substring search should match at least 2 symbols, got %d", len(substring))
+	}
+}
+
+// --- resolveNodeName / nameResolution tests ---
+
+// populateAmbiguousStore builds a store with several modules that share the
+// "svc-catalogue" prefix plus a symbol, modeling the real-world ambiguity the
+// resolution object addresses.
+func populateAmbiguousStore() *facts.Store {
+	store := facts.NewStore()
+	store.Add(
+		facts.Fact{Kind: facts.KindModule, Name: "cmd/svc-catalogue", Props: map[string]any{"language": "go"}},
+		facts.Fact{Kind: facts.KindModule, Name: "cmd/svc-catalogue-consumer", Props: map[string]any{"language": "go"}},
+		facts.Fact{Kind: facts.KindModule, Name: "cmd/svc-catalogue-asynq", Props: map[string]any{"language": "go"}},
+		facts.Fact{Kind: facts.KindModule, Name: "cmd/svc-catalogue-filters", Props: map[string]any{"language": "go"}},
+		facts.Fact{Kind: facts.KindModule, Name: "cmd/svc-catalogue-task", Props: map[string]any{"language": "go"}},
+		facts.Fact{Kind: facts.KindSymbol, Name: "cmd/svc-catalogue-asynq.jobServerResources",
+			File: "cmd/svc-catalogue-asynq/main.go", Line: 12,
+			Props: map[string]any{"symbol_kind": "function", "language": "go"}},
+	)
+	return store
+}
+
+func TestResolveNodeName_ExactMatch(t *testing.T) {
+	store := populateTestStore()
+	srv := newTestServer(store)
+
+	name, res, err := srv.resolveNodeName(store, "internal/server")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if name != "internal/server" {
+		t.Errorf("matched = %q, want internal/server", name)
+	}
+	if res != nil {
+		t.Errorf("expected nil resolution for exact match, got %+v", res)
+	}
+}
+
+func TestResolveNodeName_SingleSubstring(t *testing.T) {
+	store := populateTestStore()
+	srv := newTestServer(store)
+
+	// "handleQuery" substring-matches exactly one fact.
+	name, res, err := srv.resolveNodeName(store, "handleQuery")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if name != "internal/server.handleQuery" {
+		t.Errorf("matched = %q, want internal/server.handleQuery", name)
+	}
+	if res != nil {
+		t.Errorf("expected nil resolution for single substring match, got %+v", res)
+	}
+}
+
+func TestResolveNodeName_ConfidentSuffixExact(t *testing.T) {
+	store := populateTestStore()
+	srv := newTestServer(store)
+
+	// "Query" hits internal/facts.Store.Query and internal/server.handleQuery,
+	// but only the former's last segment equals "Query" — a confident pick.
+	name, res, err := srv.resolveNodeName(store, "Query")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if name != "internal/facts.Store.Query" {
+		t.Errorf("matched = %q, want internal/facts.Store.Query", name)
+	}
+	if res != nil {
+		t.Errorf("expected nil resolution for confident suffix match, got %+v", res)
+	}
+}
+
+func TestResolveNodeName_AmbiguousBelowThreshold(t *testing.T) {
+	store := facts.NewStore()
+	store.Add(
+		facts.Fact{Kind: facts.KindModule, Name: "svc-foo", Props: map[string]any{"language": "go"}},
+		facts.Fact{Kind: facts.KindModule, Name: "svc-bar", Props: map[string]any{"language": "go"}},
+	)
+	srv := newTestServer(store)
+
+	// "svc" matches both modules (2, below threshold) with no suffix winner.
+	name, res, err := srv.resolveNodeName(store, "svc")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if name == "" {
+		t.Fatal("expected a best-guess match below threshold, got empty")
+	}
+	if res == nil {
+		t.Fatal("expected a non-nil resolution for ambiguous match")
+	}
+	if !res.Ambiguous {
+		t.Error("resolution should be marked ambiguous")
+	}
+	if res.Matched != name {
+		t.Errorf("resolution.Matched = %q, want %q", res.Matched, name)
+	}
+	if res.Query != "svc" {
+		t.Errorf("resolution.Query = %q, want svc", res.Query)
+	}
+	if len(res.Alternatives) != 1 {
+		t.Errorf("expected 1 alternative, got %v", res.Alternatives)
+	}
+	for _, alt := range res.Alternatives {
+		if alt == name {
+			t.Errorf("alternatives should exclude the matched name %q", name)
+		}
+	}
+}
+
+func TestResolveNodeName_OverThreshold(t *testing.T) {
+	store := populateAmbiguousStore()
+	srv := newTestServer(store)
+
+	name, res, err := srv.resolveNodeName(store, "svc-catalogue")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if name != "" {
+		t.Errorf("expected empty match over threshold, got %q", name)
+	}
+	if res == nil {
+		t.Fatal("expected a non-nil resolution over threshold")
+	}
+	if res.Matched != "" {
+		t.Errorf("resolution.Matched should be empty over threshold, got %q", res.Matched)
+	}
+	if !res.Ambiguous {
+		t.Error("resolution should be marked ambiguous")
+	}
+	if res.Query != "svc-catalogue" {
+		t.Errorf("resolution.Query = %q, want svc-catalogue", res.Query)
+	}
+	if len(res.Alternatives) < ambiguousMatchThreshold {
+		t.Errorf("expected at least %d alternatives, got %v", ambiguousMatchThreshold, res.Alternatives)
+	}
+}
+
+func TestResolveNodeName_OverThresholdCapsAlternatives(t *testing.T) {
+	store := facts.NewStore()
+	for i := 0; i < maxAlternatives+5; i++ {
+		store.Add(facts.Fact{Kind: facts.KindModule, Name: "pkg/widget" + itoa(i), Props: map[string]any{"language": "go"}})
+	}
+	srv := newTestServer(store)
+
+	_, res, err := srv.resolveNodeName(store, "pkg/widget")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if res == nil {
+		t.Fatal("expected a resolution")
+	}
+	if len(res.Alternatives) > maxAlternatives {
+		t.Errorf("alternatives = %d, want <= %d", len(res.Alternatives), maxAlternatives)
+	}
+}
+
+func TestResolveNodeName_NoMatch(t *testing.T) {
+	store := populateTestStore()
+	srv := newTestServer(store)
+
+	_, res, err := srv.resolveNodeName(store, "doesNotExistAnywhere")
+	if err == nil {
+		t.Fatal("expected an error for no match")
+	}
+	if res != nil {
+		t.Errorf("expected nil resolution on no match, got %+v", res)
+	}
+}
+
+// itoa is a tiny local helper for building distinct test fact names.
+func itoa(n int) string {
+	if n == 0 {
+		return "0"
+	}
+	var buf [20]byte
+	i := len(buf)
+	for n > 0 {
+		i--
+		buf[i] = byte('0' + n%10)
+		n /= 10
+	}
+	return string(buf[i:])
+}
+
+// --- response wrapper marshaling tests ---
+
+func TestTraverseResponse_MarshalWithResolution(t *testing.T) {
+	resp := traverseResponse{
+		Resolution: &nameResolution{
+			Query:        "svc-catalogue",
+			Matched:      "cmd/svc-catalogue",
+			Alternatives: []string{"cmd/svc-catalogue-asynq"},
+			Ambiguous:    true,
+		},
+		TraversalResult: facts.TraversalResult{
+			Nodes: []facts.TraversalNode{{Name: "cmd/svc-catalogue", Kind: "module"}},
+			Edges: []facts.TraversalEdge{},
+		},
+	}
+	data, err := json.MarshalIndent(resp, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal failed: %v", err)
+	}
+	out := string(data)
+	for _, want := range []string{`"resolution"`, `"matched"`, `"alternatives"`, `"ambiguous": true`, `"nodes"`, `"edges"`} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output missing %s:\n%s", want, out)
+		}
+	}
+}
+
+func TestTraverseResponse_MarshalOmitsResolutionWhenNil(t *testing.T) {
+	resp := traverseResponse{
+		TraversalResult: facts.TraversalResult{
+			Nodes: []facts.TraversalNode{{Name: "internal/server", Kind: "module"}},
+		},
+	}
+	data, err := json.MarshalIndent(resp, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal failed: %v", err)
+	}
+	if strings.Contains(string(data), "resolution") {
+		t.Errorf("expected no resolution key, got:\n%s", string(data))
+	}
+}
+
+func TestTraverseResponse_MarshalOverThresholdEmptyArrays(t *testing.T) {
+	resp := traverseResponse{
+		Resolution: &nameResolution{Query: "svc-catalogue", Ambiguous: true},
+		TraversalResult: facts.TraversalResult{
+			Nodes: []facts.TraversalNode{},
+			Edges: []facts.TraversalEdge{},
+		},
+	}
+	data, err := json.MarshalIndent(resp, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal failed: %v", err)
+	}
+	out := string(data)
+	if !strings.Contains(out, `"nodes": []`) {
+		t.Errorf("expected empty nodes array (not null), got:\n%s", out)
+	}
+	if !strings.Contains(out, `"edges": []`) {
+		t.Errorf("expected empty edges array (not null), got:\n%s", out)
+	}
+	if strings.Contains(out, `"matched"`) {
+		t.Errorf("matched should be omitted when empty, got:\n%s", out)
+	}
+}
+
+func TestFindPathResponse_MarshalIndependentResolutions(t *testing.T) {
+	resp := findPathResponse{
+		FromResolution: &nameResolution{Query: "svc-catalogue", Ambiguous: true},
+		PathResult:     facts.PathResult{From: "", To: "internal/facts", Found: false},
+	}
+	data, err := json.MarshalIndent(resp, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal failed: %v", err)
+	}
+	out := string(data)
+	if !strings.Contains(out, `"from_resolution"`) {
+		t.Errorf("expected from_resolution, got:\n%s", out)
+	}
+	if strings.Contains(out, `"to_resolution"`) {
+		t.Errorf("to_resolution should be omitted when nil, got:\n%s", out)
 	}
 }
 
