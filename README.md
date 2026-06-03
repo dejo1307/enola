@@ -298,7 +298,7 @@ the extractors already capture:
   clients) is matched to a route another repo *serves* (`role:"server"` or a framework route) by
   normalized path + method. The caller is recorded as depending on the servee.
 - **Import / shared-lib references** — an import whose `@scope`/leading segment names another loaded
-  repo (e.g. `@marketplace-web/core-api`, `core/money`) records a dependency on that repo.
+  repo (e.g. `@app-web/lib-api`, `lib-core/money`) records a dependency on that repo.
 
 These become real facts you can query and traverse:
 
@@ -309,14 +309,14 @@ These become real facts you can query and traverse:
 Because they are ordinary graph nodes/edges, the traversal tools become cross-repo aware with no
 extra steps:
 
-> "Traverse from svc-pricing — which services does it depend on?"
-> `traverse(start="svc-pricing")` now reaches `svc-catalogue`, `core`, …
+> "Traverse from svc-alpha — which services does it depend on?"
+> `traverse(start="svc-alpha")` now reaches `svc-beta`, `lib-core`, …
 
-> "What is the path from marketplace-web to svc-catalogue?"
-> `find_path(from="marketplace-web", to="svc-catalogue")`
+> "What is the path from app-web to svc-beta?"
+> `find_path(from="app-web", to="svc-beta")`
 
-> "If I change svc-catalogue, which services are impacted?"
-> `impact_analysis(target="svc-catalogue")` lists the dependent services.
+> "If I change svc-beta, which services are impacted?"
+> `impact_analysis(target="svc-beta")` lists the dependent services.
 
 The link set is recomputed from scratch on every append, so it always reflects exactly the repos
 currently loaded. The cross-repo dependencies also appear as a **Cross-Repo Dependencies** section in
