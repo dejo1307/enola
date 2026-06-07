@@ -6,8 +6,8 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/dejo1307/enola/internal/config"
-	"github.com/dejo1307/enola/internal/facts"
+	"github.com/enola-labs/enola/internal/config"
+	"github.com/enola-labs/enola/internal/facts"
 )
 
 func TestIsIgnored(t *testing.T) {

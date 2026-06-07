@@ -9,7 +9,7 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/dejo1307/enola/internal/facts"
+	"github.com/enola-labs/enola/internal/facts"
 )
 
 // SwiftExtractor extracts architectural facts from Swift source code using line-based regex parsing.

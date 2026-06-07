@@ -26,7 +26,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/dejo1307/enola/internal/facts"
+	"github.com/enola-labs/enola/internal/facts"
 )
 
 // SyntheticMarker tags every fact this package emits, so the engine can drop and

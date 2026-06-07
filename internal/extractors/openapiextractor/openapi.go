@@ -9,7 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/dejo1307/enola/internal/facts"
+	"github.com/enola-labs/enola/internal/facts"
 	"gopkg.in/yaml.v3"
 )
 

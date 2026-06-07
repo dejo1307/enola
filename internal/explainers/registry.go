@@ -3,7 +3,7 @@ package explainers
 import (
 	"context"
 
-	"github.com/dejo1307/enola/internal/facts"
+	"github.com/enola-labs/enola/internal/facts"
 )
 
 // Explainer analyzes facts and produces architectural insights.

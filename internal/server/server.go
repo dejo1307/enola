@@ -9,9 +9,9 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/dejo1307/enola/internal/config"
-	"github.com/dejo1307/enola/internal/engine"
-	"github.com/dejo1307/enola/internal/facts"
+	"github.com/enola-labs/enola/internal/config"
+	"github.com/enola-labs/enola/internal/engine"
+	"github.com/enola-labs/enola/internal/facts"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 

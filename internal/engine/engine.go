@@ -15,12 +15,12 @@ import (
 	"sync"
 	"time"
 
-	"github.com/dejo1307/enola/internal/config"
-	"github.com/dejo1307/enola/internal/explainers"
-	"github.com/dejo1307/enola/internal/extractors"
-	"github.com/dejo1307/enola/internal/facts"
-	"github.com/dejo1307/enola/internal/linkers/crossrepo"
-	"github.com/dejo1307/enola/internal/renderers"
+	"github.com/enola-labs/enola/internal/config"
+	"github.com/enola-labs/enola/internal/explainers"
+	"github.com/enola-labs/enola/internal/extractors"
+	"github.com/enola-labs/enola/internal/facts"
+	"github.com/enola-labs/enola/internal/linkers/crossrepo"
+	"github.com/enola-labs/enola/internal/renderers"
 )
 
 // Engine orchestrates the snapshot generation pipeline.

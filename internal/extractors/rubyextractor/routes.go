@@ -8,7 +8,7 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/dejo1307/enola/internal/facts"
+	"github.com/enola-labs/enola/internal/facts"
 )
 
 // Route DSL regex patterns.

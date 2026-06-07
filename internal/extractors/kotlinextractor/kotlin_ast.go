@@ -5,7 +5,7 @@ import (
 	"strings"
 	"unicode"
 
-	"github.com/dejo1307/enola/internal/facts"
+	"github.com/enola-labs/enola/internal/facts"
 	kotlin "github.com/tree-sitter-grammars/tree-sitter-kotlin/bindings/go"
 	sitter "github.com/tree-sitter/go-tree-sitter"
 )

@@ -3,7 +3,7 @@ package kotlinextractor
 import (
 	"testing"
 
-	"github.com/dejo1307/enola/internal/facts"
+	"github.com/enola-labs/enola/internal/facts"
 )
 
 func extractAST(t *testing.T, src string, isAndroid bool) []facts.Fact {

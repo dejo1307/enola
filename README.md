@@ -1,3 +1,5 @@
+> **Moved:** This project has moved from [dejo1307/enola](https://github.com/dejo1307/enola) to [enola-labs/enola](https://github.com/enola-labs/enola). All references, imports, and URLs have been updated. The old repository will redirect to the new location.
+
 # enola
 
 Give your AI agent a map of the codebase before it starts exploring.
