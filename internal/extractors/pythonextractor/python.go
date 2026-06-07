@@ -10,7 +10,7 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/dejo1307/enola/internal/facts"
+	"github.com/enola-labs/enola/internal/facts"
 )
 
 // PythonExtractor extracts architectural facts from Python source code using

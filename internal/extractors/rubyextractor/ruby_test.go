@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/dejo1307/enola/internal/facts"
+	"github.com/enola-labs/enola/internal/facts"
 )
 
 func TestExtractFile_BasicClassAndMethod(t *testing.T) {

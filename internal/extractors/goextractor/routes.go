@@ -5,7 +5,7 @@ import (
 	"go/token"
 	"strings"
 
-	"github.com/dejo1307/enola/internal/facts"
+	"github.com/enola-labs/enola/internal/facts"
 )
 
 // routeInfo holds a detected route registration.

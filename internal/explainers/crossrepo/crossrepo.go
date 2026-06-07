@@ -9,7 +9,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/dejo1307/enola/internal/facts"
+	"github.com/enola-labs/enola/internal/facts"
 )
 
 // CrossRepoExplainer turns synthetic cross_repo dependency facts into insights.

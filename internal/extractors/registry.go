@@ -3,7 +3,7 @@ package extractors
 import (
 	"context"
 
-	"github.com/dejo1307/enola/internal/facts"
+	"github.com/enola-labs/enola/internal/facts"
 )
 
 // Extractor parses source files for a specific language and emits architectural facts.

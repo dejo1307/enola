@@ -3,7 +3,7 @@ package renderers
 import (
 	"context"
 
-	"github.com/dejo1307/enola/internal/facts"
+	"github.com/enola-labs/enola/internal/facts"
 )
 
 // Renderer produces output artifacts from a snapshot.
