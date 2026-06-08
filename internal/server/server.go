@@ -697,6 +697,18 @@ func (s *Server) resolveNodeName(store *facts.Store, input string) (string, *nam
 	// Try substring match
 	results := store.Query("", "", input, "")
 	if len(results) == 0 {
+		// Fallback 1: exact name match on KindService facts (service nodes are
+		// named after repo labels and are often missed by substring search).
+		for _, svc := range store.ByKind(facts.KindService) {
+			if strings.EqualFold(svc.Name, input) {
+				return svc.Name, nil, nil
+			}
+		}
+		// Fallback 2: input matches a known repo label whose service node may
+		// have an empty name (primary repo) or hasn't been loaded yet.
+		if name, ok := s.resolveRepoLabelToServiceNode(store, input); ok {
+			return name, nil, nil
+		}
 		return "", nil, fmt.Errorf("no facts matching %q", input)
 	}
 	if len(results) == 1 {
@@ -722,8 +734,14 @@ func (s *Server) resolveNodeName(store *facts.Store, input string) (string, *nam
 
 	// Beyond this point the pick is a heuristic guess, so the result is
 	// ambiguous. If the candidate count crosses the threshold, refuse to guess
-	// and force an exact re-invocation.
+	// and force an exact re-invocation — unless the input is the exact name of
+	// a service node, in which case we pick it confidently.
 	if len(results) >= ambiguousMatchThreshold {
+		for _, svc := range store.ByKind(facts.KindService) {
+			if strings.EqualFold(svc.Name, input) {
+				return svc.Name, nil, nil
+			}
+		}
 		return "", &nameResolution{
 			Query:        query,
 			Alternatives: candidateNames(results, ""),
@@ -763,6 +781,37 @@ func (s *Server) resolveNodeName(store *facts.Store, input string) (string, *nam
 		Alternatives: candidateNames(results, matched),
 		Ambiguous:    true,
 	}, nil
+}
+
+// resolveRepoLabelToServiceNode maps a user-supplied label to the corresponding
+// KindService fact name. Handles appended repos (label in RepoPaths) and the
+// primary repo (base name of Snapshot.Meta.RepoPath), whose service node has
+// Repo == "" and Name == "".
+func (s *Server) resolveRepoLabelToServiceNode(store *facts.Store, input string) (string, bool) {
+	services := store.ByKind(facts.KindService)
+	inputLower := strings.ToLower(input)
+
+	for label := range s.eng.RepoPaths() {
+		if strings.ToLower(label) == inputLower {
+			for _, svc := range services {
+				if strings.ToLower(svc.Repo) == inputLower || strings.ToLower(svc.Name) == inputLower {
+					return svc.Name, true
+				}
+			}
+		}
+	}
+
+	if snap := s.eng.Snapshot(); snap != nil {
+		if strings.ToLower(filepath.Base(snap.Meta.RepoPath)) == inputLower {
+			for _, svc := range services {
+				if svc.Repo == "" {
+					return svc.Name, true
+				}
+			}
+		}
+	}
+
+	return "", false
 }
 
 // candidateNames collects up to maxAlternatives fact names from results,
