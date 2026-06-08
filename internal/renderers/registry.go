@@ -1,18 +1,12 @@
 package renderers
 
 import (
-	"context"
-
-	"github.com/enola-labs/enola/internal/facts"
+	"github.com/enola-labs/enola/pkg/plugin"
 )
 
 // Renderer produces output artifacts from a snapshot.
-type Renderer interface {
-	// Name returns the renderer identifier (e.g. "llm_context").
-	Name() string
-	// Render produces artifacts from the given snapshot.
-	Render(ctx context.Context, snapshot *facts.Snapshot) ([]facts.Artifact, error)
-}
+// Deprecated: use plugin.Renderer instead. This alias is kept for backward compatibility.
+type Renderer = plugin.Renderer
 
 // Registry holds registered renderers.
 type Registry struct {

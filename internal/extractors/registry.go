@@ -1,20 +1,12 @@
 package extractors
 
 import (
-	"context"
-
-	"github.com/enola-labs/enola/internal/facts"
+	"github.com/enola-labs/enola/pkg/plugin"
 )
 
 // Extractor parses source files for a specific language and emits architectural facts.
-type Extractor interface {
-	// Name returns the extractor identifier (e.g. "go", "typescript").
-	Name() string
-	// Detect returns true if this extractor supports the given repository.
-	Detect(repoPath string) (bool, error)
-	// Extract parses files in the repository and returns extracted facts.
-	Extract(ctx context.Context, repoPath string, files []string) ([]facts.Fact, error)
-}
+// Deprecated: use plugin.Extractor instead. This alias is kept for backward compatibility.
+type Extractor = plugin.Extractor
 
 // Registry holds registered extractors.
 type Registry struct {
