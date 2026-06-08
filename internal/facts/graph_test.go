@@ -582,3 +582,82 @@ func contains(ss []string, s string) bool {
 	}
 	return false
 }
+
+// TestNewGraph_CrossRepoCallNormalisation verifies that cross-repo call targets
+// whose import paths include a known Go module path are normalised to the
+// repo-relative fact name when building the graph.
+func TestNewGraph_CrossRepoCallNormalisation(t *testing.T) {
+	// Simulate two repos loaded together:
+	//   - go-auth repo: root module fact with modulePath prop, plus symbol facts
+	//   - golf repo: symbol with a call target using the full external import path
+	facts := []Fact{
+		// go-auth root module fact — carries the Go module path
+		{
+			Kind: KindModule,
+			Name: ".",
+			Repo: "go-auth",
+			Props: map[string]any{
+				"package":    "goauth",
+				"language":   "go",
+				"modulePath": "github.com/dejo1307/go-auth",
+			},
+		},
+		// go-auth adapters module
+		{Kind: KindModule, Name: "adapters", Repo: "go-auth"},
+		// go-auth symbol: adapters.AuthHandler.Login
+		{
+			Kind: KindSymbol,
+			Name: "adapters.AuthHandler.Login",
+			Repo: "go-auth",
+		},
+		// golf symbol with an unresolved external call target
+		{
+			Kind: KindSymbol,
+			Name: "internal/auth.LoginWrapper.Login",
+			Repo: "golf",
+			Relations: []Relation{
+				{Kind: RelCalls, Target: "github.com/dejo1307/go-auth/adapters.AuthHandler.Login"},
+			},
+		},
+	}
+
+	g := NewGraph(facts)
+
+	// The forward edge from golf's LoginWrapper.Login should point to the
+	// normalised fact name "adapters.AuthHandler.Login", not the full import path.
+	edges := g.forward["internal/auth.LoginWrapper.Login"]
+	if len(edges) == 0 {
+		t.Fatal("expected at least one forward edge from LoginWrapper.Login")
+	}
+	found := false
+	for _, e := range edges {
+		if e.RelKind == RelCalls && e.Target == "adapters.AuthHandler.Login" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected normalised call edge to adapters.AuthHandler.Login; got edges: %v", edges)
+	}
+}
+
+// TestNormalizeExternalTarget verifies the helper directly.
+func TestNormalizeExternalTarget(t *testing.T) {
+	mods := map[string]struct{}{"github.com/dejo1307/go-auth": {}}
+
+	cases := []struct {
+		target string
+		want   string
+	}{
+		{"github.com/dejo1307/go-auth/adapters.Handler.Login", "adapters.Handler.Login"},
+		{"github.com/dejo1307/go-auth.SecurityHeaders", "..SecurityHeaders"},
+		{"github.com/other/lib/pkg.Type.Method", ""}, // no matching module
+		{"github.com/dejo1307/go-auth", ""},           // no separator after module path
+	}
+
+	for _, tc := range cases {
+		got := normalizeExternalTarget(tc.target, mods)
+		if got != tc.want {
+			t.Errorf("normalizeExternalTarget(%q) = %q, want %q", tc.target, got, tc.want)
+		}
+	}
+}

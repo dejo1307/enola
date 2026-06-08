@@ -247,12 +247,203 @@ func helper() {}
 		t.Fatal("expected fact for pkg.DoWork")
 	}
 
-	// Should have calls relations for helper() and fmt.Println()
-	if !hasRelation(doWork, facts.RelCalls, "helper") {
-		t.Error("DoWork should have calls relation for helper")
+	// Bare call resolves to pkgDir.funcName.
+	if !hasRelation(doWork, facts.RelCalls, "pkg.helper") {
+		t.Error("DoWork should have calls relation for pkg.helper")
 	}
+	// stdlib alias "fmt" resolves to "fmt" (no module prefix to strip), so target is "fmt.Println".
 	if !hasRelation(doWork, facts.RelCalls, "fmt.Println") {
 		t.Error("DoWork should have calls relation for fmt.Println")
+	}
+}
+
+func TestExtract_CallResolution_ImportQualified(t *testing.T) {
+	ff := extractAll(t, map[string]string{
+		"internal/server/server.go": `package server
+
+import "testmod/internal/auth"
+
+func Handle() {
+	auth.CreateUser()
+}
+`,
+		"internal/auth/auth.go": `package auth
+
+func CreateUser() {}
+`,
+	})
+
+	handle, ok := findFact(ff, "internal/server.Handle")
+	if !ok {
+		t.Fatal("expected fact for internal/server.Handle")
+	}
+	// "auth" alias maps to "internal/auth", so call resolves to "internal/auth.CreateUser".
+	if !hasRelation(handle, facts.RelCalls, "internal/auth.CreateUser") {
+		t.Errorf("Handle should call internal/auth.CreateUser; relations: %v", handle.Relations)
+	}
+}
+
+func TestExtract_CallResolution_ExplicitAlias(t *testing.T) {
+	ff := extractAll(t, map[string]string{
+		"internal/server/server.go": `package server
+
+import authlib "testmod/internal/auth"
+
+func Handle() {
+	authlib.NewClient()
+}
+`,
+	})
+
+	handle, ok := findFact(ff, "internal/server.Handle")
+	if !ok {
+		t.Fatal("expected fact for internal/server.Handle")
+	}
+	// Explicit alias "authlib" maps to "internal/auth".
+	if !hasRelation(handle, facts.RelCalls, "internal/auth.NewClient") {
+		t.Errorf("Handle should call internal/auth.NewClient; relations: %v", handle.Relations)
+	}
+}
+
+func TestExtract_CallResolution_ReceiverMethod(t *testing.T) {
+	ff := extractAll(t, map[string]string{
+		"pkg/handler.go": `package pkg
+
+type Handler struct{}
+
+func (h *Handler) DoSomething() {
+	h.OtherMethod()
+}
+
+func (h *Handler) OtherMethod() {}
+`,
+	})
+
+	do, ok := findFact(ff, "pkg.Handler.DoSomething")
+	if !ok {
+		t.Fatal("expected fact for pkg.Handler.DoSomething")
+	}
+	// h → *Handler receiver; h.OtherMethod() → pkg.Handler.OtherMethod
+	if !hasRelation(do, facts.RelCalls, "pkg.Handler.OtherMethod") {
+		t.Errorf("DoSomething should call pkg.Handler.OtherMethod; relations: %v", do.Relations)
+	}
+}
+
+func TestExtract_CallResolution_FieldChain(t *testing.T) {
+	ff := extractAll(t, map[string]string{
+		"pkg/server.go": `package pkg
+
+type Server struct {
+	auth AuthService
+}
+
+type AuthService struct{}
+
+func (s *Server) Handle() {
+	s.auth.Validate()
+}
+
+func (a *AuthService) Validate() {}
+`,
+	})
+
+	handle, ok := findFact(ff, "pkg.Server.Handle")
+	if !ok {
+		t.Fatal("expected fact for pkg.Server.Handle")
+	}
+	// s → *Server; s.auth → field type AuthService (same pkg); s.auth.Validate() → pkg.AuthService.Validate
+	if !hasRelation(handle, facts.RelCalls, "pkg.AuthService.Validate") {
+		t.Errorf("Handle should call pkg.AuthService.Validate; relations: %v", handle.Relations)
+	}
+}
+
+func TestExtract_CallResolution_Fallback(t *testing.T) {
+	ff := extractAll(t, map[string]string{
+		"pkg/fallback.go": `package pkg
+
+func DoStuff(a interface{}) {
+	// a.b.c.d() — unresolvable chain
+}
+`,
+	})
+
+	// Just verify extraction completes without panic (no fact with an unresolvable call target).
+	_, ok := findFact(ff, "pkg.DoStuff")
+	if !ok {
+		t.Fatal("expected fact for pkg.DoStuff")
+	}
+}
+
+func TestExtract_CallResolution_SelfImport(t *testing.T) {
+	// Subpackage imports the module root (exact-match self-import). The resolver
+	// must map the import alias to "." so that field-chain resolution produces
+	// root-package fact names like "..LocalService.DoWork".
+	ff := extractAll(t, map[string]string{
+		"auth.go": `package testmod
+
+type AuthLibrary struct {
+	Service LocalService
+}
+
+type LocalService struct{}
+`,
+		"adapters/handler.go": `package adapters
+
+import auth "testmod"
+
+type Handler struct {
+	authLib *auth.AuthLibrary
+}
+
+func (h *Handler) Register() {
+	h.authLib.Service.DoWork()
+}
+
+func (s *auth.LocalService) DoWork() {}
+`,
+	})
+
+	register, ok := findFact(ff, "adapters.Handler.Register")
+	if !ok {
+		t.Fatal("expected fact for adapters.Handler.Register")
+	}
+	// h.authLib → "..AuthLibrary" (root pkg), .Service → "..LocalService", .DoWork → "..LocalService.DoWork"
+	if !hasRelation(register, facts.RelCalls, "..LocalService.DoWork") {
+		t.Errorf("Register should call ..LocalService.DoWork; relations: %v", register.Relations)
+	}
+}
+
+func TestExtract_CallResolution_CrossPackageFieldChain(t *testing.T) {
+	// Two packages in the same module. The server package has a struct with a
+	// field typed from the auth package; handler method calls through that field.
+	ff := extractAll(t, map[string]string{
+		"pkg/auth/auth.go": `package auth
+
+type Service struct{}
+
+func (s *Service) ValidateToken() {}
+`,
+		"pkg/server/server.go": `package server
+
+import "testmod/pkg/auth"
+
+type Handler struct {
+	auth auth.Service
+}
+
+func (h *Handler) Handle() {
+	h.auth.ValidateToken()
+}
+`,
+	})
+
+	handle, ok := findFact(ff, "pkg/server.Handler.Handle")
+	if !ok {
+		t.Fatal("expected fact for pkg/server.Handler.Handle")
+	}
+	// h.auth → "pkg/auth.Service", .ValidateToken() → "pkg/auth.Service.ValidateToken"
+	if !hasRelation(handle, facts.RelCalls, "pkg/auth.Service.ValidateToken") {
+		t.Errorf("Handle should call pkg/auth.Service.ValidateToken; relations: %v", handle.Relations)
 	}
 }
 

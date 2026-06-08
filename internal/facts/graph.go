@@ -80,6 +80,11 @@ type PathResult struct {
 // to the import target. This bridges the structural gap where modules and their
 // dependencies are separate facts: module "internal/server" ←→ dependency fact
 // "internal/server -> internal/config" → target "internal/config".
+//
+// For cross-repo call targets (e.g. "github.com/dejo1307/go-auth/adapters.Handler.Login"
+// emitted by an external consumer), the graph normalises the target by stripping known
+// Go module path prefixes (stored in KindModule facts as props["modulePath"]). This
+// allows edges to land on the correct fact in the loaded external repo.
 func NewGraph(ff []Fact) *Graph {
 	g := &Graph{
 		forward:  make(map[string][]Edge),
@@ -89,8 +94,9 @@ func NewGraph(ff []Fact) *Graph {
 		edgeSeen: make(map[string]struct{}),
 	}
 
-	// First pass: index all fact names and collect module names
+	// First pass: index all fact names, collect module names and Go module paths.
 	moduleNames := make(map[string]bool)
+	modulePaths := make(map[string]struct{}) // Go module paths for cross-repo normalisation
 	for i, f := range ff {
 		if f.Name != "" {
 			if _, exists := g.factIdx[f.Name]; !exists {
@@ -99,13 +105,28 @@ func NewGraph(ff []Fact) *Graph {
 		}
 		if f.Kind == KindModule {
 			moduleNames[f.Name] = true
+			if mp, ok := f.Props["modulePath"].(string); ok && mp != "" {
+				modulePaths[mp] = struct{}{}
+			}
 		}
 	}
 
 	// Second pass: build adjacency lists
 	for _, f := range ff {
 		for _, rel := range f.Relations {
-			g.addEdge(f.Name, rel.Kind, rel.Target)
+			target := rel.Target
+			// For unresolved call targets, attempt cross-repo normalisation by
+			// stripping known Go module path prefixes.
+			if rel.Kind == RelCalls {
+				if _, exists := g.factIdx[target]; !exists {
+					if normalized := normalizeExternalTarget(target, modulePaths); normalized != "" {
+						if _, exists := g.factIdx[normalized]; exists {
+							target = normalized
+						}
+					}
+				}
+			}
+			g.addEdge(f.Name, rel.Kind, target)
 		}
 
 		// For dependency facts with imports, also create module→target edges
@@ -400,6 +421,29 @@ func (g *Graph) ImpactSet(target string, maxDepth, maxNodes int, includeForward 
 	}
 
 	return result
+}
+
+// normalizeExternalTarget strips a known Go module path prefix from a call
+// target that doesn't match any fact. This bridges cross-repo call edges where
+// the consumer emits the full import path (e.g. "github.com/x/go-auth/adapters.Handler.Login")
+// but the provider's facts use the repo-relative path (e.g. "adapters.Handler.Login").
+//
+//   subpackage: "github.com/x/go-auth/adapters.Handler.Login" → "adapters.Handler.Login"
+//   root pkg:   "github.com/x/go-auth.SecurityHeaders"        → "..SecurityHeaders"
+func normalizeExternalTarget(target string, modulePaths map[string]struct{}) string {
+	for modulePath := range modulePaths {
+		if !strings.HasPrefix(target, modulePath) {
+			continue
+		}
+		after := target[len(modulePath):]
+		switch {
+		case strings.HasPrefix(after, "/"):
+			return after[1:] // subpackage: strip leading "/"
+		case strings.HasPrefix(after, "."):
+			return "." + after // root pkg: ".Sym" → "..Sym" (pkgDir="." naming)
+		}
+	}
+	return ""
 }
 
 func (g *Graph) addEdge(source, relKind, target string) {
