@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/enola-labs/enola/internal/config"
 	"github.com/enola-labs/enola/internal/engine"
@@ -99,6 +100,16 @@ type Server struct {
 // Run starts the MCP server on the stdio transport.
 func (s *Server) Run(ctx context.Context) error {
 	return s.srv.Run(ctx)
+}
+
+// SetToolCallback sets a callback invoked each time a tool is called.
+func (s *Server) SetToolCallback(cb func(string)) {
+	s.srv.SetToolCallback(cb)
+}
+
+// StartTime returns the time the server started (zero value if Run() hasn't been called).
+func (s *Server) StartTime() time.Time {
+	return s.srv.GetStartTime()
 }
 
 // Options controls bootstrap behavior.

@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/enola-labs/enola/internal/config"
 	"github.com/enola-labs/enola/internal/engine"
@@ -17,9 +18,11 @@ import (
 
 // Server wraps the MCP server and connects it to the snapshot engine.
 type Server struct {
-	mcp *mcp.Server
-	eng *engine.Engine
-	cfg *config.Config
+	mcp          *mcp.Server
+	eng          *engine.Engine
+	cfg          *config.Config
+	startTime    time.Time
+	toolCallback func(string)
 }
 
 // New creates a new MCP server wired to the given engine.
@@ -42,8 +45,20 @@ func New(eng *engine.Engine, cfg *config.Config) (*Server, error) {
 
 // Run starts the MCP server on the stdio transport.
 func (s *Server) Run(ctx context.Context) error {
+	s.startTime = time.Now()
 	log.Println("[server] starting MCP server on stdio transport")
 	return s.mcp.Run(ctx, &mcp.StdioTransport{})
+}
+
+// SetToolCallback sets a callback invoked each time a tool is called.
+// The callback receives the tool name. It is safe to call before Run().
+func (s *Server) SetToolCallback(cb func(string)) {
+	s.toolCallback = cb
+}
+
+// GetStartTime returns the time the server started (zero value if Run() hasn't been called).
+func (s *Server) GetStartTime() time.Time {
+	return s.startTime
 }
 
 // generateSnapshotArgs are the arguments for the generate_snapshot tool.
@@ -123,6 +138,9 @@ func (s *Server) registerTools() {
 		Name:        "generate_snapshot",
 		Description: "Generate an architectural snapshot of a repository. Parses source code, extracts facts, detects patterns, and produces an LLM-ready context summary. Use append=true to add a second repository without clearing existing facts (for cross-repo analysis).",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, args generateSnapshotArgs) (*mcp.CallToolResult, any, error) {
+		if s.toolCallback != nil {
+			s.toolCallback("generate_snapshot")
+		}
 		repoPath := args.RepoPath
 		if repoPath == "" {
 			repoPath = s.cfg.Repo
@@ -215,6 +233,9 @@ func (s *Server) registerTools() {
 		Name:        "query_facts",
 		Description: "Query the extracted architectural facts by kind, file, name, or relation type. Returns matching facts as JSON. Supports batch filters (names, files, kinds), file prefix matching, pagination (offset/limit), and relation expansion (include_related). For dependencies, filter with prop='source' and prop_value='internal'|'external'|'stdlib' to control noise.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, args queryFactsArgs) (*mcp.CallToolResult, any, error) {
+		if s.toolCallback != nil {
+			s.toolCallback("query_facts")
+		}
 		store := s.eng.Store()
 		if store.Count() == 0 {
 			return errorResult("No facts available. Run generate_snapshot first."), nil, nil
@@ -350,6 +371,9 @@ func (s *Server) registerTools() {
 		Name:        "show_symbol",
 		Description: "Show source code for a symbol found in the architectural snapshot. Returns the actual implementation with surrounding context lines.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, args showSymbolArgs) (*mcp.CallToolResult, any, error) {
+		if s.toolCallback != nil {
+			s.toolCallback("show_symbol")
+		}
 		snapshot := s.eng.Snapshot()
 		if snapshot == nil {
 			return errorResult("No snapshot available. Run generate_snapshot first."), nil, nil
@@ -439,6 +463,9 @@ func (s *Server) registerTools() {
 		Name:        "explore",
 		Description: "Explore a module, file, symbol, or directory in a single call. Returns a rich markdown summary with symbols, dependencies, dependents, and relations — replacing many query_facts calls with one.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, args exploreArgs) (*mcp.CallToolResult, any, error) {
+		if s.toolCallback != nil {
+			s.toolCallback("explore")
+		}
 		store := s.eng.Store()
 		if store.Count() == 0 {
 			return errorResult("No facts available. Run generate_snapshot first."), nil, nil
@@ -489,6 +516,9 @@ func (s *Server) registerTools() {
 		Name:        "traverse",
 		Description: "Walk the dependency/call graph from a starting point. Use direction='forward' to answer 'what does X depend on?' and direction='reverse' to answer 'what depends on X?'. Returns a list of nodes and edges up to the specified depth. Use this instead of multiple explore calls when you need to understand transitive relationships.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, args traverseArgs) (*mcp.CallToolResult, any, error) {
+		if s.toolCallback != nil {
+			s.toolCallback("traverse")
+		}
 		store := s.eng.Store()
 		if store.Count() == 0 {
 			return errorResult("No facts available. Run generate_snapshot first."), nil, nil
@@ -536,6 +566,9 @@ func (s *Server) registerTools() {
 		Name:        "find_path",
 		Description: "Find the shortest path between two nodes in the architectural graph. Use this to answer 'how does X reach Y?' or 'what is the call chain from main to this function?'. Returns the path as an ordered list of nodes and edges, or reports that no path exists.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, args findPathArgs) (*mcp.CallToolResult, any, error) {
+		if s.toolCallback != nil {
+			s.toolCallback("find_path")
+		}
 		store := s.eng.Store()
 		if store.Count() == 0 {
 			return errorResult("No facts available. Run generate_snapshot first."), nil, nil
@@ -581,6 +614,9 @@ func (s *Server) registerTools() {
 		Name:        "impact_analysis",
 		Description: "Analyze the impact of changing a module, symbol, or file. Returns all nodes that transitively depend on the target (i.e., what would be affected if the target changes), grouped by depth. Use this for refactoring planning, understanding blast radius, and change risk assessment.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, args impactAnalysisArgs) (*mcp.CallToolResult, any, error) {
+		if s.toolCallback != nil {
+			s.toolCallback("impact_analysis")
+		}
 		store := s.eng.Store()
 		if store.Count() == 0 {
 			return errorResult("No facts available. Run generate_snapshot first."), nil, nil
