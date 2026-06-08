@@ -7,25 +7,10 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/enola-labs/enola/internal/config"
-	"github.com/enola-labs/enola/internal/engine"
-	crossrepoexp "github.com/enola-labs/enola/internal/explainers/crossrepo"
-	"github.com/enola-labs/enola/internal/explainers/cycles"
-	"github.com/enola-labs/enola/internal/explainers/layers"
-	"github.com/enola-labs/enola/internal/extractors/goextractor"
-	"github.com/enola-labs/enola/internal/extractors/kotlinextractor"
-	"github.com/enola-labs/enola/internal/extractors/openapiextractor"
-	"github.com/enola-labs/enola/internal/extractors/pythonextractor"
-	"github.com/enola-labs/enola/internal/extractors/rubyextractor"
-	"github.com/enola-labs/enola/internal/extractors/swiftextractor"
-	"github.com/enola-labs/enola/internal/extractors/tsextractor"
-	"github.com/enola-labs/enola/internal/facts"
-	"github.com/enola-labs/enola/internal/renderers/llmcontext"
-	"github.com/enola-labs/enola/internal/server"
+	"github.com/enola-labs/enola/pkg/bootstrap"
 )
 
 func main() {
-	// Ensure log output goes to stderr, never stdout (MCP uses stdout for JSON-RPC)
 	log.SetOutput(os.Stderr)
 
 	ctx := context.Background()
@@ -40,40 +25,12 @@ func main() {
 		}
 	}
 
-	// If the config path is relative, resolve it first against the current
-	// working directory, then (as a fallback) against the directory containing
-	// the binary itself. This ensures the config is found when Cursor starts
-	// the MCP server from a different working directory.
-	cfg, err := config.Load(cfgPath)
-	if err != nil && !filepath.IsAbs(cfgPath) {
-		if exePath, exErr := os.Executable(); exErr == nil {
-			exeDir := filepath.Dir(exePath)
-			cfg, err = config.Load(filepath.Join(exeDir, cfgPath))
-		}
-	}
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "warning: %v, using defaults\n", err)
-		cfg = config.Default()
-	}
-
-	eng, err := engine.New(cfg)
+	eng, cfg, err := bootstrap.NewEngine(bootstrap.Options{
+		ConfigPath: cfgPath,
+	})
 	if err != nil {
 		log.Fatalf("failed to create engine: %v", err)
 	}
-
-	eng.RegisterExtractor(goextractor.New())
-	eng.RegisterExtractor(kotlinextractor.New())
-	eng.RegisterExtractor(openapiextractor.New())
-	eng.RegisterExtractor(pythonextractor.New())
-	eng.RegisterExtractor(tsextractor.New())
-	eng.RegisterExtractor(swiftextractor.New())
-	eng.RegisterExtractor(rubyextractor.New())
-
-	eng.RegisterExplainer(cycles.New())
-	eng.RegisterExplainer(layers.New())
-	eng.RegisterExplainer(crossrepoexp.New())
-
-	eng.RegisterRenderer(llmcontext.New(cfg.Output.MaxContextTokens))
 
 	if generateMode {
 		repoPath, err := filepath.Abs(cfg.Repo)
@@ -100,27 +57,9 @@ func main() {
 		os.Exit(0)
 	}
 
-	// Auto-load existing snapshot if available (so queries work immediately
-	// without requiring a generate_snapshot call first).
-	if repoPath, err := filepath.Abs(cfg.Repo); err == nil {
-		factsPath := filepath.Join(repoPath, cfg.Output.Dir, "facts.jsonl")
-		if _, err := os.Stat(factsPath); err == nil {
-			log.Printf("[main] loading existing snapshot from %s", factsPath)
-			if err := eng.Store().ReadJSONLFile(factsPath); err != nil {
-				log.Printf("[main] warning: failed to load existing facts: %v", err)
-			} else {
-				repoLabel := filepath.Base(repoPath)
-				eng.Store().SetRepoRange(0, repoLabel)
-				eng.Store().BuildGraph()
-				eng.SetSnapshot(&facts.Snapshot{
-					Meta: facts.SnapshotMeta{RepoPath: repoPath},
-				})
-				log.Printf("[main] loaded %d facts from existing snapshot", eng.Store().Count())
-			}
-		}
-	}
+	bootstrap.AutoLoadSnapshot(eng, cfg)
 
-	srv, err := server.New(eng, cfg)
+	srv, err := bootstrap.NewServer(eng, cfg)
 	if err != nil {
 		log.Fatalf("failed to create server: %v", err)
 	}

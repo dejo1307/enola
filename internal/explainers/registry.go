@@ -1,18 +1,12 @@
 package explainers
 
 import (
-	"context"
-
-	"github.com/enola-labs/enola/internal/facts"
+	"github.com/enola-labs/enola/pkg/plugin"
 )
 
 // Explainer analyzes facts and produces architectural insights.
-type Explainer interface {
-	// Name returns the explainer identifier (e.g. "cycles", "layers").
-	Name() string
-	// Explain analyzes the fact store and returns insights.
-	Explain(ctx context.Context, store *facts.Store) ([]facts.Insight, error)
-}
+// Deprecated: use plugin.Explainer instead. This alias is kept for backward compatibility.
+type Explainer = plugin.Explainer
 
 // Registry holds registered explainers.
 type Registry struct {
