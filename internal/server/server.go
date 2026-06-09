@@ -135,8 +135,13 @@ func renderNamesOnly(results []facts.Fact, total int) string {
 func (s *Server) registerTools() {
 	// Tool: generate_snapshot
 	mcp.AddTool(s.mcp, &mcp.Tool{
-		Name:        "generate_snapshot",
-		Description: "Generate an architectural snapshot of a repository. Parses source code, extracts facts, detects patterns, and produces an LLM-ready context summary. Use append=true to add a second repository without clearing existing facts (for cross-repo analysis).",
+		Name: "generate_snapshot",
+		Description: "Index a repository and extract its architecture as queryable facts. " +
+			"Supports Go, TypeScript, Kotlin, Ruby, Python, Swift, and OpenAPI. " +
+			"Produces facts of kind: module, symbol, route, storage, dependency, service. " +
+			"Run this first before any other tool. Re-run after code changes. " +
+			"In multi-repo mode, call with append=true for each additional repo after the first; " +
+			"enola auto-enables append when it detects you have switched to a different repo.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, args generateSnapshotArgs) (*mcp.CallToolResult, any, error) {
 		if s.toolCallback != nil {
 			s.toolCallback("generate_snapshot")
@@ -230,8 +235,14 @@ func (s *Server) registerTools() {
 
 	// Tool: query_facts
 	mcp.AddTool(s.mcp, &mcp.Tool{
-		Name:        "query_facts",
-		Description: "Query the extracted architectural facts by kind, file, name, or relation type. Returns matching facts as JSON. Supports batch filters (names, files, kinds), file prefix matching, pagination (offset/limit), and relation expansion (include_related). For dependencies, filter with prop='source' and prop_value='internal'|'external'|'stdlib' to control noise.",
+		Name: "query_facts",
+		Description: "Precision filter over extracted facts. Use after explore when you need specific subsets — " +
+			"e.g. all symbols in a file, all external dependencies, all routes. " +
+			"Fact kinds: module, symbol, route, storage, dependency, service. " +
+			"name= is a substring match; names= is exact (batch). files= and kinds= are OR filters; combined with other fields they are AND. " +
+			"output_mode='compact' or 'names' saves tokens for large result sets. " +
+			"For dependencies, set prop='source' prop_value='internal'|'external'|'stdlib' to filter noise. " +
+			"Supports pagination via offset/limit (default 100, max 500).",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, args queryFactsArgs) (*mcp.CallToolResult, any, error) {
 		if s.toolCallback != nil {
 			s.toolCallback("query_facts")
@@ -368,8 +379,12 @@ func (s *Server) registerTools() {
 
 	// Tool: show_symbol
 	mcp.AddTool(s.mcp, &mcp.Tool{
-		Name:        "show_symbol",
-		Description: "Show source code for a symbol found in the architectural snapshot. Returns the actual implementation with surrounding context lines.",
+		Name: "show_symbol",
+		Description: "Return the source code implementation of a named symbol. " +
+			"Prefers exact name match; falls back to substring match and returns up to 5 results. " +
+			"Default context: 60 lines (asymmetric: ~15 before declaration, ~45 after). " +
+			"Use context_lines to widen or narrow the window. " +
+			"Works in both single-repo and multi-repo (append) mode.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, args showSymbolArgs) (*mcp.CallToolResult, any, error) {
 		if s.toolCallback != nil {
 			s.toolCallback("show_symbol")
@@ -460,8 +475,13 @@ func (s *Server) registerTools() {
 
 	// Tool: explore
 	mcp.AddTool(s.mcp, &mcp.Tool{
-		Name:        "explore",
-		Description: "Explore a module, file, symbol, or directory in a single call. Returns a rich markdown summary with symbols, dependencies, dependents, and relations — replacing many query_facts calls with one.",
+		Name: "explore",
+		Description: "Primary exploration tool — use this first after generate_snapshot. " +
+			"Given a module name, file path, symbol name, or directory prefix, returns a structured markdown summary: " +
+			"symbols (with kinds and line numbers), direct dependencies, reverse dependents, and at depth=2 symbol-level relations. " +
+			"'Module' means a package-level grouping (e.g. a Go package or TypeScript file group), not a repo. " +
+			"Accepts absolute filesystem paths — they are normalised automatically. " +
+			"Use query_facts for precise filtering, traverse for multi-hop graph walks.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, args exploreArgs) (*mcp.CallToolResult, any, error) {
 		if s.toolCallback != nil {
 			s.toolCallback("explore")
@@ -513,8 +533,13 @@ func (s *Server) registerTools() {
 
 	// Tool: traverse
 	mcp.AddTool(s.mcp, &mcp.Tool{
-		Name:        "traverse",
-		Description: "Walk the dependency/call graph from a starting point. Use direction='forward' to answer 'what does X depend on?' and direction='reverse' to answer 'what depends on X?'. Returns a list of nodes and edges up to the specified depth. Use this instead of multiple explore calls when you need to understand transitive relationships.",
+		Name: "traverse",
+		Description: "Walk the dependency/call graph from a starting node. " +
+			"direction='forward' answers \"what does X depend on?\"; direction='reverse' answers \"what depends on X?\". " +
+			"start= accepts substring match; returns resolution info when ambiguous. " +
+			"relation_kinds filter: imports, calls, declares, implements, depends_on. " +
+			"node_kinds filters output (not traversal itself): module, symbol, dependency, route, storage. " +
+			"Defaults: depth=5, max_nodes=100. Use instead of repeated explore calls for transitive relationships.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, args traverseArgs) (*mcp.CallToolResult, any, error) {
 		if s.toolCallback != nil {
 			s.toolCallback("traverse")
@@ -563,8 +588,12 @@ func (s *Server) registerTools() {
 
 	// Tool: find_path
 	mcp.AddTool(s.mcp, &mcp.Tool{
-		Name:        "find_path",
-		Description: "Find the shortest path between two nodes in the architectural graph. Use this to answer 'how does X reach Y?' or 'what is the call chain from main to this function?'. Returns the path as an ordered list of nodes and edges, or reports that no path exists.",
+		Name: "find_path",
+		Description: "Find the shortest path (BFS, by hop count) between two nodes in the architectural graph. " +
+			"Answers \"how does X reach Y?\" or \"what is the call chain from A to B?\". " +
+			"from= and to= use substring match with smart disambiguation; when either name is ambiguous " +
+			"the response contains a resolution object listing candidates instead of a path. " +
+			"Returns an ordered list of nodes and edges, or reports no path found within max_depth hops.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, args findPathArgs) (*mcp.CallToolResult, any, error) {
 		if s.toolCallback != nil {
 			s.toolCallback("find_path")
@@ -611,8 +640,13 @@ func (s *Server) registerTools() {
 
 	// Tool: impact_analysis
 	mcp.AddTool(s.mcp, &mcp.Tool{
-		Name:        "impact_analysis",
-		Description: "Analyze the impact of changing a module, symbol, or file. Returns all nodes that transitively depend on the target (i.e., what would be affected if the target changes), grouped by depth. Use this for refactoring planning, understanding blast radius, and change risk assessment.",
+		Name: "impact_analysis",
+		Description: "Compute the blast radius of changing a target node: all nodes that transitively depend on it, grouped by hop depth. " +
+			"Use for refactoring planning and change risk assessment. " +
+			"target= uses substring match with smart disambiguation. " +
+			"Default: reverse direction only (what breaks if target changes). " +
+			"Set include_forward=true to also see what the target itself depends on (useful for understanding what could break the target). " +
+			"Defaults: max_depth=3, max_nodes=200.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, args impactAnalysisArgs) (*mcp.CallToolResult, any, error) {
 		if s.toolCallback != nil {
 			s.toolCallback("impact_analysis")
