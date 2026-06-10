@@ -61,6 +61,12 @@ func (s *Server) GetStartTime() time.Time {
 	return s.startTime
 }
 
+// MCPServer returns the underlying MCP server so that enterprise (or third-party)
+// code can register additional, license-gated tools alongside the OSS tools.
+func (s *Server) MCPServer() *mcp.Server {
+	return s.mcp
+}
+
 // generateSnapshotArgs are the arguments for the generate_snapshot tool.
 type generateSnapshotArgs struct {
 	RepoPath string `json:"repo_path" jsonschema:"Path to the repository to analyze. Defaults to the configured repo path."`

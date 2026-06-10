@@ -24,6 +24,7 @@ import (
 	"github.com/enola-labs/enola/internal/renderers/llmcontext"
 	"github.com/enola-labs/enola/internal/server"
 	"github.com/enola-labs/enola/pkg/plugin"
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
 // Engine wraps the internal engine with a public interface for
@@ -110,6 +111,12 @@ func (s *Server) SetToolCallback(cb func(string)) {
 // StartTime returns the time the server started (zero value if Run() hasn't been called).
 func (s *Server) StartTime() time.Time {
 	return s.srv.GetStartTime()
+}
+
+// MCP returns the underlying MCP server so enterprise code can register
+// additional (license-gated) tools before calling Run.
+func (s *Server) MCP() *mcp.Server {
+	return s.srv.MCPServer()
 }
 
 // Options controls bootstrap behavior.
