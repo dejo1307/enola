@@ -281,9 +281,9 @@ object UseCaseModule {
     fun provideJournalCodecUseCase(): JournalCodecUseCase = JournalCodecUseCase()
 }
 `, true)
-	f, ok := findFact(ff, "pkg.provideJournalCodecUseCase")
+	f, ok := findFact(ff, "pkg.UseCaseModule.provideJournalCodecUseCase")
 	if !ok {
-		t.Fatal("expected fact for pkg.provideJournalCodecUseCase (function)")
+		t.Fatal("expected fact for pkg.UseCaseModule.provideJournalCodecUseCase (function)")
 	}
 	if !hasRelation(f, facts.RelInstantiates, "JournalCodecUseCase") {
 		t.Errorf("expected RelInstantiates → JournalCodecUseCase on Hilt provider, got %+v", f.Relations)
@@ -307,6 +307,200 @@ class Foo {
 		if r.Kind == facts.RelInstantiates {
 			t.Errorf("unexpected RelInstantiates edge: %+v", r)
 		}
+	}
+	// A lowercase bare call is a regular function call → RelCalls (same package).
+	if !hasRelation(f, facts.RelCalls, "pkg.computeSomething") {
+		t.Errorf("expected RelCalls → pkg.computeSomething, got %+v", f.Relations)
+	}
+}
+
+func TestAST_SamePackageFunctionCall(t *testing.T) {
+	ff := extractAST(t, `
+package pkg
+fun caller() {
+    helper()
+}
+fun helper() {}
+`, false)
+	caller, ok := findFact(ff, "pkg.caller")
+	if !ok {
+		t.Fatal("expected fact for pkg.caller")
+	}
+	if !hasRelation(caller, facts.RelCalls, "pkg.helper") {
+		t.Errorf("expected RelCalls → pkg.helper, got %+v", caller.Relations)
+	}
+}
+
+func TestAST_ImportedFunctionCall(t *testing.T) {
+	src := `
+package com.example.app
+import com.example.util.formatName
+fun caller() {
+    formatName()
+}
+`
+	// sourceRoot carries a trailing slash in real layouts (e.g. "app/src/main/kotlin/").
+	ff := extractFileAST([]byte(src), "src/com/example/app/caller.kt", false, "src/", "com.example")
+	caller, ok := findFact(ff, "src/com/example/app.caller")
+	if !ok {
+		t.Fatal("expected fact for src/com/example/app.caller")
+	}
+	// formatName is imported from com.example.util → resolves to the canonical
+	// symbol fact name in that package's directory.
+	if !hasRelation(caller, facts.RelCalls, "src/com/example/util.formatName") {
+		t.Errorf("expected RelCalls → src/com/example/util.formatName, got %+v", caller.Relations)
+	}
+}
+
+func TestAST_ExternalImportedCall_NoEdge(t *testing.T) {
+	src := `
+package com.example.app
+import kotlinx.coroutines.runBlocking
+fun caller() {
+    runBlocking()
+}
+`
+	ff := extractFileAST([]byte(src), "com/example/app/caller.kt", false, "", "com.example")
+	caller, ok := findFact(ff, "com/example/app.caller")
+	if !ok {
+		t.Fatal("expected fact for com/example/app.caller")
+	}
+	// runBlocking is imported from an external package — no local fact, so no edge.
+	for _, r := range caller.Relations {
+		if r.Kind == facts.RelCalls {
+			t.Errorf("unexpected RelCalls edge for external import: %+v", r)
+		}
+	}
+}
+
+func TestAST_MethodCallOnReceiver_NoEdge(t *testing.T) {
+	// A method call on a receiver (navigation expression) is left unresolved
+	// because the receiver type is unknown without type information.
+	ff := extractAST(t, `
+package pkg
+class Foo {
+    fun run() {
+        repository.save()
+    }
+}
+`, false)
+	run, ok := findFact(ff, "pkg.Foo.run")
+	if !ok {
+		t.Fatal("expected fact for pkg.Foo.run")
+	}
+	for _, r := range run.Relations {
+		if r.Kind == facts.RelCalls {
+			t.Errorf("unexpected RelCalls edge for navigation call: %+v", r)
+		}
+	}
+}
+
+func TestAST_MethodFactIsClassQualified(t *testing.T) {
+	ff := extractAST(t, `
+package pkg
+class Service {
+    fun handle() {}
+}
+`, false)
+	if _, ok := findFact(ff, "pkg.Service.handle"); !ok {
+		t.Error("expected class-qualified method fact pkg.Service.handle")
+	}
+	if _, ok := findFact(ff, "pkg.handle"); ok {
+		t.Error("method should NOT be named flat pkg.handle")
+	}
+	f, _ := findFact(ff, "pkg.Service.handle")
+	if f.Props["receiver"] != "Service" {
+		t.Errorf("receiver prop = %v, want Service", f.Props["receiver"])
+	}
+}
+
+func TestAST_SameClassBareCall(t *testing.T) {
+	ff := extractAST(t, `
+package pkg
+class Service {
+    fun a() {
+        b()
+    }
+    fun b() {}
+}
+`, false)
+	a, ok := findFact(ff, "pkg.Service.a")
+	if !ok {
+		t.Fatal("expected fact for pkg.Service.a")
+	}
+	// Bare call b() inside class Service resolves to the qualified sibling method.
+	if !hasRelation(a, facts.RelCalls, "pkg.Service.b") {
+		t.Errorf("expected RelCalls → pkg.Service.b, got %+v", a.Relations)
+	}
+	if hasRelation(a, facts.RelCalls, "pkg.b") {
+		t.Error("bare same-class call should not resolve to flat pkg.b")
+	}
+}
+
+func TestAST_ThisMethodCall(t *testing.T) {
+	ff := extractAST(t, `
+package pkg
+class Service {
+    fun a() {
+        this.b()
+    }
+    fun b() {}
+}
+`, false)
+	a, ok := findFact(ff, "pkg.Service.a")
+	if !ok {
+		t.Fatal("expected fact for pkg.Service.a")
+	}
+	if !hasRelation(a, facts.RelCalls, "pkg.Service.b") {
+		t.Errorf("expected RelCalls → pkg.Service.b for this.b(), got %+v", a.Relations)
+	}
+}
+
+func TestAST_StdlibCalls_NoEdge(t *testing.T) {
+	// Auto-imported Kotlin stdlib / scope functions must not produce dangling edges.
+	ff := extractAST(t, `
+package pkg
+fun caller() {
+    runCatching { }
+    listOf(1, 2)
+    println("hi")
+    val x = 3.let { it + 1 }
+    helper()
+}
+fun helper() {}
+`, false)
+	caller, ok := findFact(ff, "pkg.caller")
+	if !ok {
+		t.Fatal("expected fact for pkg.caller")
+	}
+	if !hasRelation(caller, facts.RelCalls, "pkg.helper") {
+		t.Errorf("expected RelCalls → pkg.helper, got %+v", caller.Relations)
+	}
+	for _, name := range []string{"pkg.runCatching", "pkg.listOf", "pkg.println", "pkg.let"} {
+		if hasRelation(caller, facts.RelCalls, name) {
+			t.Errorf("stdlib call should not produce edge %q", name)
+		}
+	}
+}
+
+func TestAST_TopLevelFunctionCall_StillFlat(t *testing.T) {
+	// Regression guard: a same-package top-level function call still resolves to
+	// the flat "<dir>.fn" name, unaffected by class qualification.
+	ff := extractAST(t, `
+package pkg
+class Service {
+    fun a() {
+        topLevelHelper()
+    }
+}
+fun topLevelHelper() {}
+`, false)
+	a, ok := findFact(ff, "pkg.Service.a")
+	if !ok {
+		t.Fatal("expected fact for pkg.Service.a")
+	}
+	if !hasRelation(a, facts.RelCalls, "pkg.topLevelHelper") {
+		t.Errorf("expected RelCalls → pkg.topLevelHelper, got %+v", a.Relations)
 	}
 }
 

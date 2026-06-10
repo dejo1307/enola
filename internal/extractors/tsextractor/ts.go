@@ -164,7 +164,8 @@ func (e *TSExtractor) extractFile(src []byte, relFile string, isNextJS bool, ali
 
 	// Extract from the tree
 	result = append(result, e.extractImports(root, src, relFile, aliases)...)
-	result = append(result, e.extractDeclarations(root, src, relFile)...)
+	importMap := buildImportSymbols(root, src, relFile, aliases)
+	result = append(result, e.extractDeclarations(root, src, relFile, importMap)...)
 
 	// Detect Next.js routes
 	if isNextJS {
@@ -220,20 +221,20 @@ func (e *TSExtractor) extractImports(root *sitter.Node, src []byte, relFile stri
 	return result
 }
 
-func (e *TSExtractor) extractDeclarations(root *sitter.Node, src []byte, relFile string) []facts.Fact {
+func (e *TSExtractor) extractDeclarations(root *sitter.Node, src []byte, relFile string, importMap map[string]string) []facts.Fact {
 	var result []facts.Fact
 	dir := filepath.Dir(relFile)
 
 	for i := range root.ChildCount() {
 		child := root.Child(i)
-		ff := e.extractNode(child, src, relFile, dir, false)
+		ff := e.extractNode(child, src, relFile, dir, false, importMap)
 		result = append(result, ff...)
 	}
 
 	return result
 }
 
-func (e *TSExtractor) extractNode(node *sitter.Node, src []byte, relFile, dir string, isExported bool) []facts.Fact {
+func (e *TSExtractor) extractNode(node *sitter.Node, src []byte, relFile, dir string, isExported bool, importMap map[string]string) []facts.Fact {
 	var result []facts.Fact
 
 	switch node.Kind() {
@@ -253,13 +254,15 @@ func (e *TSExtractor) extractNode(node *sitter.Node, src []byte, relFile, dir st
 			decl = findChildByKind(node, "lexical_declaration")
 		}
 		if decl != nil {
-			return e.extractNode(decl, src, relFile, dir, true)
+			return e.extractNode(decl, src, relFile, dir, true, importMap)
 		}
 
 	case "function_declaration":
 		name := findChildByKind(node, "identifier")
 		if name != nil {
 			symbolName := nodeText(name, src)
+			rels := []facts.Relation{{Kind: facts.RelDeclares, Target: dir}}
+			rels = append(rels, collectCalls(node, src, dir, "", importMap)...)
 			result = append(result, facts.Fact{
 				Kind: facts.KindSymbol,
 				Name: dir + "." + symbolName,
@@ -270,9 +273,7 @@ func (e *TSExtractor) extractNode(node *sitter.Node, src []byte, relFile, dir st
 					"exported":    isExported,
 					"language":    "typescript",
 				},
-				Relations: []facts.Relation{
-					{Kind: facts.RelDeclares, Target: dir},
-				},
+				Relations: rels,
 			})
 		}
 
@@ -345,6 +346,8 @@ func (e *TSExtractor) extractNode(node *sitter.Node, src []byte, relFile, dir st
 							break
 						}
 					}
+					mRels := []facts.Relation{{Kind: facts.RelDeclares, Target: dir}}
+					mRels = append(mRels, collectCalls(member, src, dir, symbolName, importMap)...)
 					result = append(result, facts.Fact{
 						Kind: facts.KindSymbol,
 						Name: dir + "." + symbolName + "." + mName,
@@ -356,9 +359,7 @@ func (e *TSExtractor) extractNode(node *sitter.Node, src []byte, relFile, dir st
 							"language":    "typescript",
 							"receiver":    symbolName,
 						},
-						Relations: []facts.Relation{
-							{Kind: facts.RelDeclares, Target: dir},
-						},
+						Relations: mRels,
 					})
 				}
 			}
@@ -419,6 +420,10 @@ func (e *TSExtractor) extractNode(node *sitter.Node, src []byte, relFile, dir st
 						symbolKind = facts.SymbolFunc
 					}
 
+					vRels := []facts.Relation{{Kind: facts.RelDeclares, Target: dir}}
+					if value != nil {
+						vRels = append(vRels, collectCalls(value, src, dir, "", importMap)...)
+					}
 					result = append(result, facts.Fact{
 						Kind: facts.KindSymbol,
 						Name: dir + "." + symbolName,
@@ -429,9 +434,7 @@ func (e *TSExtractor) extractNode(node *sitter.Node, src []byte, relFile, dir st
 							"exported":    isExported,
 							"language":    "typescript",
 						},
-						Relations: []facts.Relation{
-							{Kind: facts.RelDeclares, Target: dir},
-						},
+						Relations: vRels,
 					})
 				}
 			}
@@ -673,4 +676,114 @@ func resolveImportPath(importPath, fileDir string, aliases map[string]string) (s
 
 	// Everything else is external (react, next/image, @tanstack/react-query, etc.)
 	return importPath, true
+}
+
+// buildImportSymbols returns a map of locally-bound import name → canonical symbol
+// fact name for named imports from internal modules. It lets bare calls to
+// imported functions (e.g. `formatName()`) resolve to the callee's declaration
+// fact. Symbols declared in an imported module are named "<moduleDir>.<exportName>",
+// where moduleDir is the directory of the resolved module file — this matches the
+// common file-module case (e.g. import "./utils" → utils.ts → "<dir>.foo").
+func buildImportSymbols(root *sitter.Node, src []byte, relFile string, aliases map[string]string) map[string]string {
+	fileDir := filepath.Dir(relFile)
+	m := make(map[string]string)
+	for i := range root.ChildCount() {
+		child := root.Child(i)
+		if child.Kind() != "import_statement" {
+			continue
+		}
+		source := findChildByKind(child, "string")
+		if source == nil {
+			continue
+		}
+		importPath := strings.Trim(nodeText(source, src), `"'`)
+		resolved, isExternal := resolveImportPath(importPath, fileDir, aliases)
+		if isExternal {
+			continue // external modules have no local declaration facts
+		}
+		moduleDir := filepath.Dir(resolved)
+
+		clause := findChildByKind(child, "import_clause")
+		if clause == nil {
+			continue
+		}
+		named := findChildByKind(clause, "named_imports")
+		if named == nil {
+			continue // default/namespace imports are not resolved
+		}
+		for j := range named.ChildCount() {
+			spec := named.Child(j)
+			if spec.Kind() != "import_specifier" {
+				continue
+			}
+			nameNode := spec.ChildByFieldName("name")
+			if nameNode == nil {
+				continue
+			}
+			exportName := nodeText(nameNode, src)
+			local := exportName
+			if aliasNode := spec.ChildByFieldName("alias"); aliasNode != nil {
+				local = nodeText(aliasNode, src)
+			}
+			m[local] = moduleDir + "." + exportName
+		}
+	}
+	return m
+}
+
+// collectCalls walks a function/method body subtree and returns deduplicated
+// RelCalls relations for each resolvable call expression. className, when
+// non-empty, enables resolution of `this.method()` to "<dir>.<className>.<method>".
+func collectCalls(node *sitter.Node, src []byte, dir, className string, importMap map[string]string) []facts.Relation {
+	var rels []facts.Relation
+	seen := make(map[string]bool)
+	var walk func(n *sitter.Node)
+	walk = func(n *sitter.Node) {
+		if n == nil {
+			return
+		}
+		if n.Kind() == "call_expression" {
+			if target := resolveTSCall(n, src, dir, className, importMap); target != "" && !seen[target] {
+				seen[target] = true
+				rels = append(rels, facts.Relation{Kind: facts.RelCalls, Target: target})
+			}
+		}
+		for i := range n.ChildCount() {
+			walk(n.Child(i))
+		}
+	}
+	walk(node)
+	return rels
+}
+
+// resolveTSCall resolves a single call_expression to a canonical target fact name,
+// or "" when the call cannot be resolved (e.g. a method call on a value of unknown
+// type). It resolves:
+//   - bare calls `foo()` → imported symbol via importMap, else same-module "<dir>.foo"
+//   - `this.method()` inside a class → "<dir>.<className>.method"
+func resolveTSCall(call *sitter.Node, src []byte, dir, className string, importMap map[string]string) string {
+	fn := call.ChildByFieldName("function")
+	if fn == nil {
+		return ""
+	}
+	switch fn.Kind() {
+	case "identifier":
+		name := nodeText(fn, src)
+		if target, ok := importMap[name]; ok {
+			return target
+		}
+		return dir + "." + name
+	case "member_expression":
+		object := fn.ChildByFieldName("object")
+		property := fn.ChildByFieldName("property")
+		if object == nil || property == nil {
+			return ""
+		}
+		// `this.method()` resolves within the enclosing class; other receivers
+		// have an unknown type and are left unresolved to avoid dangling edges.
+		if object.Kind() == "this" && className != "" {
+			return dir + "." + className + "." + nodeText(property, src)
+		}
+	}
+	return ""
 }

@@ -55,6 +55,55 @@ type astWalker struct {
 	// New RelInstantiates / RelInjects edges discovered while walking that
 	// symbol's body are appended to its Relations slice.
 	ownerStack []*facts.Fact
+
+	// importMap maps an imported simple name to its canonical symbol fact name
+	// (e.g. "helper" → "src/util.helper"). Internal imports map to a resolvable
+	// fact name; external imports map to "" (imported, but no local fact exists).
+	// Used to resolve bare function calls to imported top-level functions.
+	importMap map[string]string
+
+	// typeStack holds the simple names of the enclosing class/object declarations,
+	// so methods declared inside them are named "<dir>.<Type>.<method>" (matching
+	// the Go/TypeScript extractors). methodStack is parallel to typeStack and holds
+	// the set of method names declared directly in each enclosing type, used to
+	// resolve same-class bare calls to "<dir>.<Type>.<method>".
+	typeStack   []string
+	methodStack []map[string]bool
+}
+
+func (w *astWalker) pushType(name string, methods map[string]bool) {
+	w.typeStack = append(w.typeStack, name)
+	w.methodStack = append(w.methodStack, methods)
+}
+
+func (w *astWalker) popType() {
+	w.typeStack = w.typeStack[:len(w.typeStack)-1]
+	w.methodStack = w.methodStack[:len(w.methodStack)-1]
+}
+
+// enclosingType returns the dotted path of enclosing type names (e.g. "Outer.Inner"),
+// or "" when not inside a type.
+func (w *astWalker) enclosingType() string {
+	return strings.Join(w.typeStack, ".")
+}
+
+// currentMethods returns the set of method names declared in the innermost
+// enclosing type, or nil when not inside a type.
+func (w *astWalker) currentMethods() map[string]bool {
+	if len(w.methodStack) == 0 {
+		return nil
+	}
+	return w.methodStack[len(w.methodStack)-1]
+}
+
+// qualify prepends the enclosing type path to a declaration's name when inside a
+// type, producing the canonical "<Type>.<name>" suffix; at top level it returns
+// name unchanged.
+func (w *astWalker) qualify(name string) string {
+	if t := w.enclosingType(); t != "" {
+		return t + "." + name
+	}
+	return name
 }
 
 func (w *astWalker) pushOwner(f *facts.Fact) { w.ownerStack = append(w.ownerStack, f) }
@@ -112,6 +161,36 @@ func (w *astWalker) handleImport(node *sitter.Node) {
 			{Kind: facts.RelImports, Target: resolved},
 		},
 	})
+
+	// Record the imported simple name so bare calls to imported top-level
+	// functions can be resolved to a canonical fact name.
+	simple := importPath
+	if i := strings.LastIndex(importPath, "."); i >= 0 {
+		simple = importPath[i+1:]
+	}
+	if simple == "" || simple == "*" {
+		return // wildcard imports carry no simple name to resolve
+	}
+	if w.importMap == nil {
+		w.importMap = make(map[string]string)
+	}
+	if isExternal {
+		// Imported, but the target lives in an external dependency — no local
+		// fact will match, so record the empty sentinel to suppress the edge.
+		w.importMap[simple] = ""
+	} else {
+		w.importMap[simple] = symbolNameFromResolvedPath(resolved)
+	}
+}
+
+// symbolNameFromResolvedPath converts a "/"-separated resolved import path (e.g.
+// "src/util/helper") into the canonical symbol fact name "<dir>.<name>" (e.g.
+// "src/util.helper") used by declaration facts.
+func symbolNameFromResolvedPath(resolved string) string {
+	if i := strings.LastIndex(resolved, "/"); i >= 0 {
+		return resolved[:i] + "." + resolved[i+1:]
+	}
+	return resolved
 }
 
 func (w *astWalker) handleClassDeclaration(node *sitter.Node) {
@@ -149,7 +228,7 @@ func (w *astWalker) handleClassDeclaration(node *sitter.Node) {
 
 	f := facts.Fact{
 		Kind: facts.KindSymbol,
-		Name: w.dir + "." + name,
+		Name: w.dir + "." + w.qualify(name),
 		File: w.relFile,
 		Line: int(node.StartPosition().Row) + 1,
 		Props: map[string]any{
@@ -197,6 +276,14 @@ func (w *astWalker) handleClassDeclaration(node *sitter.Node) {
 	owner := &w.out[len(w.out)-1]
 	w.pushOwner(owner)
 
+	// Enter the type scope: nested methods/classes are named "<dir>.<Type>.<...>",
+	// and bare same-class calls resolve against this class's declared method names.
+	body := findChildByKind(node, "class_body")
+	if body == nil {
+		body = findChildByKind(node, "enum_class_body")
+	}
+	w.pushType(name, collectMethodNames(body, w.src))
+
 	// Primary constructor parameters → RelInjects when @Inject is on the class,
 	// on the primary constructor itself (e.g., `class Foo @Inject constructor(...)`),
 	// or directly on the parameter.
@@ -212,16 +299,15 @@ func (w *astWalker) handleClassDeclaration(node *sitter.Node) {
 
 	// Walk class body for constructor calls (e.g., property initializers, init blocks,
 	// method bodies). Calls discovered here attribute to the enclosing class symbol.
-	if body := findChildByKind(node, "class_body"); body != nil {
+	if body != nil {
 		w.walkForCalls(body)
-	} else if enumBody := findChildByKind(node, "enum_class_body"); enumBody != nil {
-		w.walkForCalls(enumBody)
 	}
 
 	// Also walk the delegation_specifiers — a `: Base(arg)` call in the supertype
 	// list is a construction the class participates in. (Implements edge is already
 	// emitted; we don't double-count instantiates here.)
 
+	w.popType()
 	w.popOwner()
 }
 
@@ -245,7 +331,7 @@ func (w *astWalker) handleObjectDeclaration(node *sitter.Node) {
 
 	f := facts.Fact{
 		Kind: facts.KindSymbol,
-		Name: w.dir + "." + name,
+		Name: w.dir + "." + w.qualify(name),
 		File: w.relFile,
 		Line: int(node.StartPosition().Row) + 1,
 		Props: map[string]any{
@@ -268,9 +354,12 @@ func (w *astWalker) handleObjectDeclaration(node *sitter.Node) {
 	w.out = append(w.out, f)
 	owner := &w.out[len(w.out)-1]
 	w.pushOwner(owner)
-	if body := findChildByKind(node, "class_body"); body != nil {
+	body := findChildByKind(node, "class_body")
+	w.pushType(name, collectMethodNames(body, w.src))
+	if body != nil {
 		w.walkForCalls(body)
 	}
+	w.popType()
 	w.popOwner()
 }
 
@@ -292,7 +381,7 @@ func (w *astWalker) handleFunctionDeclaration(node *sitter.Node) {
 
 	f := facts.Fact{
 		Kind: facts.KindSymbol,
-		Name: w.dir + "." + name,
+		Name: w.dir + "." + w.qualify(name),
 		File: w.relFile,
 		Line: int(node.StartPosition().Row) + 1,
 		Props: map[string]any{
@@ -303,6 +392,11 @@ func (w *astWalker) handleFunctionDeclaration(node *sitter.Node) {
 		Relations: []facts.Relation{
 			{Kind: facts.RelDeclares, Target: w.dir},
 		},
+	}
+	// When declared inside a class/object, record the enclosing type as the
+	// receiver (parity with Go/TypeScript method facts).
+	if len(w.typeStack) > 0 {
+		f.Props["receiver"] = w.typeStack[len(w.typeStack)-1]
 	}
 	if strings.Contains(modifierText, "suspend") {
 		f.Props["suspend"] = true
@@ -458,12 +552,35 @@ func (w *astWalker) walkForCalls(node *sitter.Node) {
 	if kind == "call_expression" {
 		// First named child is the callee expression.
 		if callee := firstNamedChild(node); callee != nil {
-			if typeName := constructorCalleeName(callee, w.src); typeName != "" {
+			if name, isNav := calleeName(callee, w.src); name != "" {
 				if owner := w.currentOwner(); owner != nil {
-					owner.Relations = append(owner.Relations, facts.Relation{
-						Kind:   facts.RelInstantiates,
-						Target: typeName,
-					})
+					switch {
+					case isCapitalized(name):
+						// Kotlin convention: a capitalized callee is a constructor.
+						owner.Relations = append(owner.Relations, facts.Relation{
+							Kind:   facts.RelInstantiates,
+							Target: name,
+						})
+					case !isNav:
+						// Bare lowercase call: a same-class method, a same-package
+						// function, or an imported top-level function.
+						if target := w.resolveCall(name); target != "" {
+							owner.Relations = append(owner.Relations, facts.Relation{
+								Kind:   facts.RelCalls,
+								Target: target,
+							})
+						}
+					case navReceiverIsThis(callee, w.src):
+						// `this.method()` resolves to a sibling method of the
+						// enclosing class. Other navigation calls (method calls on a
+						// receiver of unknown type) are left unresolved.
+						if methods := w.currentMethods(); methods[name] {
+							owner.Relations = append(owner.Relations, facts.Relation{
+								Kind:   facts.RelCalls,
+								Target: w.dir + "." + w.enclosingType() + "." + name,
+							})
+						}
+					}
 				}
 			}
 		}
@@ -496,17 +613,16 @@ func (w *astWalker) walkForCalls(node *sitter.Node) {
 	}
 }
 
-// constructorCalleeName inspects a call_expression's callee. Returns the simple
-// type name if the callee looks like a constructor call (Kotlin convention: the
-// bare identifier or final navigation segment starts with an uppercase letter).
-// Returns "" otherwise (regular function calls are not yet tracked).
-func constructorCalleeName(callee *sitter.Node, src []byte) string {
+// calleeName inspects a call_expression's callee and returns its simple name
+// (the trailing identifier for navigation expressions) along with whether the
+// call was made through a navigation expression (e.g. `a.b.foo()`). Callers use
+// the name's capitalization to decide between a constructor (RelInstantiates) and
+// a function/method call (RelCalls), and isNav to decide whether the call target
+// is resolvable.
+func calleeName(callee *sitter.Node, src []byte) (string, bool) {
 	switch callee.Kind() {
 	case "simple_identifier", "identifier":
-		name := nodeText(callee, src)
-		if isCapitalized(name) {
-			return name
-		}
+		return nodeText(callee, src), false
 	case "navigation_expression":
 		// Last named child is the trailing identifier.
 		var last *sitter.Node
@@ -517,13 +633,89 @@ func constructorCalleeName(callee *sitter.Node, src []byte) string {
 			}
 		}
 		if last != nil {
-			name := nodeText(last, src)
-			if isCapitalized(name) {
-				return name
-			}
+			return nodeText(last, src), true
 		}
 	}
-	return ""
+	return "", false
+}
+
+// collectMethodNames returns the set of method names declared directly in a
+// class/object body. It is used to resolve bare same-class calls to qualified
+// "<dir>.<Type>.<method>" fact names.
+func collectMethodNames(body *sitter.Node, src []byte) map[string]bool {
+	methods := make(map[string]bool)
+	if body == nil {
+		return methods
+	}
+	for i := uint(0); i < uint(body.ChildCount()); i++ {
+		c := body.Child(i)
+		if c.Kind() != "function_declaration" {
+			continue
+		}
+		if nameNode := c.ChildByFieldName("name"); nameNode != nil {
+			methods[nodeText(nameNode, src)] = true
+		}
+	}
+	return methods
+}
+
+// kotlinBuiltins are Kotlin standard-library functions that are auto-imported
+// (kotlin.*, kotlin.collections.*, kotlin.io.*, etc.) and so appear as bare calls
+// without an explicit import statement. They are not project symbols, so resolving
+// them would produce dangling phantom call edges (the Kotlin analog of goBuiltins).
+var kotlinBuiltins = map[string]bool{
+	// Scope & control functions.
+	"let": true, "run": true, "with": true, "apply": true, "also": true,
+	"takeIf": true, "takeUnless": true, "repeat": true, "synchronized": true,
+	"lazy": true, "lazyOf": true,
+	// Preconditions & errors.
+	"require": true, "requireNotNull": true, "check": true, "checkNotNull": true,
+	"error": true, "TODO": true, "assert": true, "runCatching": true,
+	// IO.
+	"print": true, "println": true, "readLine": true, "readln": true,
+	"readlnOrNull": true,
+	// Collection / array / sequence / string builders.
+	"listOf": true, "listOfNotNull": true, "mutableListOf": true, "arrayListOf": true,
+	"setOf": true, "setOfNotNull": true, "mutableSetOf": true, "hashSetOf": true,
+	"linkedSetOf": true, "sortedSetOf": true, "mapOf": true, "mutableMapOf": true,
+	"hashMapOf": true, "linkedMapOf": true, "sortedMapOf": true, "emptyList": true,
+	"emptySet": true, "emptyMap": true, "emptyArray": true, "emptySequence": true,
+	"arrayOf": true, "arrayOfNulls": true, "booleanArrayOf": true, "byteArrayOf": true,
+	"charArrayOf": true, "doubleArrayOf": true, "floatArrayOf": true, "intArrayOf": true,
+	"longArrayOf": true, "shortArrayOf": true, "sequenceOf": true, "buildList": true,
+	"buildMap": true, "buildSet": true, "buildString": true,
+	// Numeric helpers.
+	"maxOf": true, "minOf": true,
+}
+
+// resolveCall maps a bare call name to a canonical symbol fact name, in order of
+// preference:
+//  1. a sibling method of the enclosing class → "<dir>.<Type>.<name>"
+//  2. an imported top-level function → its mapped target ("" when external)
+//  3. a Kotlin stdlib/scope function (auto-imported) → "" (no project symbol)
+//  4. otherwise a same-package top-level function → "<dir>.<name>"
+func (w *astWalker) resolveCall(name string) string {
+	if methods := w.currentMethods(); methods[name] {
+		return w.dir + "." + w.enclosingType() + "." + name
+	}
+	if target, ok := w.importMap[name]; ok {
+		return target
+	}
+	if kotlinBuiltins[name] {
+		return ""
+	}
+	return w.dir + "." + name
+}
+
+// navReceiverIsThis reports whether a navigation_expression callee's receiver is
+// the bare `this` keyword (e.g. `this.foo()`), so the call can be resolved against
+// the enclosing class's methods.
+func navReceiverIsThis(callee *sitter.Node, src []byte) bool {
+	if callee.Kind() != "navigation_expression" {
+		return false
+	}
+	first := firstNamedChild(callee)
+	return first != nil && nodeText(first, src) == "this"
 }
 
 func isCapitalized(s string) bool {
