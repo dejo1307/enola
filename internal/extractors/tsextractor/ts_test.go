@@ -361,6 +361,106 @@ func TestExtract_ClassMethods(t *testing.T) {
 	}
 }
 
+func TestExtract_CallExtraction_SameModule(t *testing.T) {
+	ff := extractAll(t, map[string]string{
+		"src/main.ts": `export function doWork() {
+  helper()
+}
+
+function helper() {}`,
+	}, false)
+
+	doWork, ok := findFact(ff, "src.doWork")
+	if !ok {
+		t.Fatal("expected fact for src.doWork")
+	}
+	if !hasRelation(doWork, facts.RelCalls, "src.helper") {
+		t.Errorf("doWork should call src.helper; relations: %v", doWork.Relations)
+	}
+}
+
+func TestExtract_CallExtraction_ThisMethod(t *testing.T) {
+	ff := extractAll(t, map[string]string{
+		"src/service.ts": `export class ApiClient {
+  login() {
+    this.refresh()
+  }
+
+  refresh() {}
+}`,
+	}, false)
+
+	login, ok := findFact(ff, "src.ApiClient.login")
+	if !ok {
+		t.Fatal("expected fact for src.ApiClient.login")
+	}
+	if !hasRelation(login, facts.RelCalls, "src.ApiClient.refresh") {
+		t.Errorf("login should call src.ApiClient.refresh; relations: %v", login.Relations)
+	}
+}
+
+func TestExtract_CallExtraction_ImportedFunction(t *testing.T) {
+	ff := extractAll(t, map[string]string{
+		"src/main.ts": `import { formatName } from './utils'
+
+export function render() {
+  formatName()
+}`,
+		"src/utils.ts": `export function formatName() {}`,
+	}, false)
+
+	render, ok := findFact(ff, "src.render")
+	if !ok {
+		t.Fatal("expected fact for src.render")
+	}
+	// formatName imported from "./utils" → resolves to src.formatName, which is
+	// the canonical fact name of the declaration in src/utils.ts.
+	if !hasRelation(render, facts.RelCalls, "src.formatName") {
+		t.Errorf("render should call src.formatName; relations: %v", render.Relations)
+	}
+	// Confirm the callee fact actually exists, so the edge is not dangling.
+	if _, ok := findFact(ff, "src.formatName"); !ok {
+		t.Error("expected callee fact src.formatName to exist")
+	}
+}
+
+func TestExtract_CallExtraction_ArrowFunction(t *testing.T) {
+	ff := extractAll(t, map[string]string{
+		"src/main.ts": `const handler = () => {
+  process()
+}
+
+function process() {}`,
+	}, false)
+
+	handler, ok := findFact(ff, "src.handler")
+	if !ok {
+		t.Fatal("expected fact for src.handler")
+	}
+	if !hasRelation(handler, facts.RelCalls, "src.process") {
+		t.Errorf("handler should call src.process; relations: %v", handler.Relations)
+	}
+}
+
+func TestExtract_CallExtraction_MethodOnReceiver_NoEdge(t *testing.T) {
+	// A method call on a value of unknown type is left unresolved.
+	ff := extractAll(t, map[string]string{
+		"src/main.ts": `export function run(client: ApiClient) {
+  client.login()
+}`,
+	}, false)
+
+	run, ok := findFact(ff, "src.run")
+	if !ok {
+		t.Fatal("expected fact for src.run")
+	}
+	for _, r := range run.Relations {
+		if r.Kind == facts.RelCalls {
+			t.Errorf("unexpected RelCalls edge for receiver method call: %v", r)
+		}
+	}
+}
+
 func TestIsTypeScriptFile(t *testing.T) {
 	tests := []struct {
 		path string

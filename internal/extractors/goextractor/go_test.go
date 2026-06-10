@@ -447,6 +447,124 @@ func (h *Handler) Handle() {
 	}
 }
 
+func TestExtract_CallResolution_LocalConstructor(t *testing.T) {
+	// A local variable assigned from a New<Type> constructor in another package;
+	// a method call on it should resolve to the canonical method fact name.
+	ff := extractAll(t, map[string]string{
+		"internal/auth/auth.go": `package auth
+
+type Service struct{}
+
+func NewService() *Service { return &Service{} }
+
+func (s *Service) Validate() {}
+`,
+		"internal/server/server.go": `package server
+
+import "testmod/internal/auth"
+
+func Handle() {
+	svc := auth.NewService()
+	svc.Validate()
+}
+`,
+	})
+
+	handle, ok := findFact(ff, "internal/server.Handle")
+	if !ok {
+		t.Fatal("expected fact for internal/server.Handle")
+	}
+	// svc := auth.NewService() infers type internal/auth.Service; svc.Validate()
+	// resolves to internal/auth.Service.Validate.
+	if !hasRelation(handle, facts.RelCalls, "internal/auth.Service.Validate") {
+		t.Errorf("Handle should call internal/auth.Service.Validate; relations: %v", handle.Relations)
+	}
+}
+
+func TestExtract_CallResolution_LocalCompositeLit(t *testing.T) {
+	ff := extractAll(t, map[string]string{
+		"pkg/handler.go": `package pkg
+
+type Service struct{}
+
+func (s *Service) Do() {}
+
+func Run() {
+	svc := &Service{}
+	svc.Do()
+}
+`,
+	})
+
+	run, ok := findFact(ff, "pkg.Run")
+	if !ok {
+		t.Fatal("expected fact for pkg.Run")
+	}
+	if !hasRelation(run, facts.RelCalls, "pkg.Service.Do") {
+		t.Errorf("Run should call pkg.Service.Do; relations: %v", run.Relations)
+	}
+}
+
+func TestExtract_CallResolution_LocalVarDecl(t *testing.T) {
+	ff := extractAll(t, map[string]string{
+		"pkg/handler.go": `package pkg
+
+type Service struct{}
+
+func (s *Service) Do() {}
+
+func Run() {
+	var svc Service
+	svc.Do()
+}
+`,
+	})
+
+	run, ok := findFact(ff, "pkg.Run")
+	if !ok {
+		t.Fatal("expected fact for pkg.Run")
+	}
+	if !hasRelation(run, facts.RelCalls, "pkg.Service.Do") {
+		t.Errorf("Run should call pkg.Service.Do; relations: %v", run.Relations)
+	}
+}
+
+func TestExtract_CallResolution_SkipsBuiltins(t *testing.T) {
+	ff := extractAll(t, map[string]string{
+		"pkg/calls.go": `package pkg
+
+func DoWork() {
+	_ = len(items())
+	_ = make([]int, 0)
+	_ = string(raw())
+	helper()
+}
+
+func items() []int { return nil }
+func raw() []byte  { return nil }
+func helper()      {}
+`,
+	})
+
+	doWork, ok := findFact(ff, "pkg.DoWork")
+	if !ok {
+		t.Fatal("expected fact for pkg.DoWork")
+	}
+	// Real same-package calls are still emitted.
+	if !hasRelation(doWork, facts.RelCalls, "pkg.helper") {
+		t.Error("DoWork should call pkg.helper")
+	}
+	if !hasRelation(doWork, facts.RelCalls, "pkg.items") {
+		t.Error("DoWork should call pkg.items")
+	}
+	// Builtins and conversions must NOT produce dangling edges.
+	for _, name := range []string{"pkg.len", "pkg.make", "pkg.string"} {
+		if hasRelation(doWork, facts.RelCalls, name) {
+			t.Errorf("DoWork should not have a calls edge for builtin %q", name)
+		}
+	}
+}
+
 func TestExtract_Imports(t *testing.T) {
 	ff := extractAll(t, map[string]string{
 		"pkg/imports.go": `package pkg

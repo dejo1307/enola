@@ -9,9 +9,27 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"unicode"
 
 	"github.com/enola-labs/enola/internal/facts"
 )
+
+// goBuiltins are Go's predeclared functions and type-conversion identifiers.
+// Bare calls to these (e.g. len(x), make(...), string(b)) are not calls to a
+// symbol, so resolving them would produce dangling phantom call edges.
+var goBuiltins = map[string]bool{
+	// Builtin functions.
+	"append": true, "cap": true, "clear": true, "close": true, "complex": true,
+	"copy": true, "delete": true, "imag": true, "len": true, "make": true,
+	"max": true, "min": true, "new": true, "panic": true, "print": true,
+	"println": true, "real": true, "recover": true,
+	// Predeclared types used as conversions.
+	"string": true, "bool": true, "byte": true, "rune": true, "error": true,
+	"any": true, "int": true, "int8": true, "int16": true, "int32": true,
+	"int64": true, "uint": true, "uint8": true, "uint16": true, "uint32": true,
+	"uint64": true, "uintptr": true, "float32": true, "float64": true,
+	"complex64": true, "complex128": true,
+}
 
 // GoExtractor extracts architectural facts from Go source code using go/ast.
 type GoExtractor struct{}
@@ -263,6 +281,7 @@ func (e *GoExtractor) extractFunc(fset *token.FileSet, fn *ast.FuncDecl, relFile
 			recvType:   receiver,
 			fieldTypes: fieldTypes,
 		}
+		ctx.localTypes = collectLocalTypes(fn.Body, ctx)
 		calls := extractCalls(fn.Body, ctx)
 		for _, call := range calls {
 			symbolFact.Relations = append(symbolFact.Relations, facts.Relation{
@@ -354,6 +373,7 @@ type resolveCtx struct {
 	recvVar    string            // receiver variable name, e.g. "h"
 	recvType   string            // receiver type (star stripped), e.g. "AuthHandler"
 	fieldTypes map[string]string // "pkgDir.TypeName.fieldName" → pre-qualified typeString
+	localTypes map[string]string // local variable name → qualified type, e.g. "svc" → "internal/auth.Service"
 }
 
 // extractCalls walks an AST node and extracts function call target names,
@@ -506,6 +526,11 @@ func resolveChain(chain []string, ctx resolveCtx) string {
 	case 0:
 		return ""
 	case 1:
+		// Builtins and predeclared type conversions (len, make, string(...), etc.)
+		// are not symbols — emitting them produces dangling phantom nodes.
+		if goBuiltins[chain[0]] {
+			return ""
+		}
 		return ctx.pkgDir + "." + chain[0]
 	case 2:
 		root, sel := chain[0], chain[1]
@@ -515,39 +540,176 @@ func resolveChain(chain []string, ctx resolveCtx) string {
 		if root == ctx.recvVar && ctx.recvType != "" {
 			return ctx.pkgDir + "." + ctx.recvType + "." + sel
 		}
+		if qualType, ok := ctx.localTypes[root]; ok && qualType != "" {
+			// root is a local variable of a known type; sel is a method on it.
+			return qualType + "." + sel
+		}
 		return root + "." + sel
 	default:
 		// 3+ elements: attempt field-chain resolution.
 		root := chain[0]
 		var qualType string // "pkgDir.TypeName" or "importedPkg.TypeName"
+		var fieldStart int   // index of the first intermediate field in chain
 
 		if root == ctx.recvVar && ctx.recvType != "" {
 			qualType = ctx.pkgDir + "." + ctx.recvType
-			for _, fieldName := range chain[1 : len(chain)-1] {
-				key := qualType + "." + fieldName
-				nextType, ok := ctx.fieldTypes[key]
-				if !ok {
-					return strings.Join(chain, ".")
-				}
-				qualType = resolveTypeName(nextType, ctx)
-			}
+			fieldStart = 1
+		} else if lt, ok := ctx.localTypes[root]; ok && lt != "" {
+			// root is a local variable; its type is already fully qualified.
+			qualType = lt
+			fieldStart = 1
 		} else if importPath, ok := ctx.imports[root]; ok {
 			// root is an import alias; chain[1] is a type in that package.
 			qualType = importPath + "." + chain[1]
-			for _, fieldName := range chain[2 : len(chain)-1] {
-				key := qualType + "." + fieldName
-				nextType, ok := ctx.fieldTypes[key]
-				if !ok {
-					return strings.Join(chain, ".")
-				}
-				qualType = resolveTypeName(nextType, ctx)
-			}
+			fieldStart = 2
 		} else {
 			return strings.Join(chain, ".")
 		}
 
+		for _, fieldName := range chain[fieldStart : len(chain)-1] {
+			key := qualType + "." + fieldName
+			nextType, ok := ctx.fieldTypes[key]
+			if !ok {
+				return strings.Join(chain, ".")
+			}
+			qualType = resolveTypeName(nextType, ctx)
+		}
+
 		return qualType + "." + chain[len(chain)-1]
 	}
+}
+
+// collectLocalTypes scans a function body for local variable declarations whose
+// type is statically knowable and returns a map of variable name → qualified type
+// name (e.g. "svc" → "internal/auth.Service"). It recognises:
+//   - `var x T` / `var x *T` declarations
+//   - `x := &Foo{}` / `x := Foo{}` composite literals
+//   - `x := NewFoo(...)` / `x := pkg.NewFoo(...)` constructor conventions
+//
+// Variable names are recorded so that calls like `svc.Do()` resolve to the
+// canonical method fact name instead of dangling on a raw join.
+func collectLocalTypes(body ast.Node, ctx resolveCtx) map[string]string {
+	locals := make(map[string]string)
+	ast.Inspect(body, func(n ast.Node) bool {
+		switch stmt := n.(type) {
+		case *ast.DeclStmt:
+			gd, ok := stmt.Decl.(*ast.GenDecl)
+			if !ok || gd.Tok != token.VAR {
+				return true
+			}
+			for _, spec := range gd.Specs {
+				vs, ok := spec.(*ast.ValueSpec)
+				if !ok {
+					continue
+				}
+				if vs.Type != nil {
+					if typeStr := typeExprToString(vs.Type); typeStr != "" {
+						qual := resolveTypeName(typeStr, ctx)
+						for _, name := range vs.Names {
+							if name.Name != "_" {
+								locals[name.Name] = qual
+							}
+						}
+					}
+					continue
+				}
+				// `var x = <rhs>` — infer from the initializer.
+				if len(vs.Names) == len(vs.Values) {
+					for i, name := range vs.Names {
+						if name.Name == "_" {
+							continue
+						}
+						if qual := inferRHSType(vs.Values[i], ctx); qual != "" {
+							locals[name.Name] = qual
+						}
+					}
+				}
+			}
+		case *ast.AssignStmt:
+			if stmt.Tok != token.DEFINE || len(stmt.Lhs) != len(stmt.Rhs) {
+				return true
+			}
+			for i, lhs := range stmt.Lhs {
+				ident, ok := lhs.(*ast.Ident)
+				if !ok || ident.Name == "_" {
+					continue
+				}
+				if qual := inferRHSType(stmt.Rhs[i], ctx); qual != "" {
+					locals[ident.Name] = qual
+				}
+			}
+		}
+		return true
+	})
+	return locals
+}
+
+// inferRHSType attempts to determine the qualified type of an expression used as
+// the right-hand side of a variable assignment. Returns "" when the type is not
+// statically knowable.
+func inferRHSType(expr ast.Expr, ctx resolveCtx) string {
+	switch e := expr.(type) {
+	case *ast.UnaryExpr:
+		// &Foo{}
+		if cl, ok := e.X.(*ast.CompositeLit); ok {
+			return compositeLitType(cl, ctx)
+		}
+	case *ast.CompositeLit:
+		// Foo{} or pkg.Foo{}
+		return compositeLitType(e, ctx)
+	case *ast.CallExpr:
+		// NewFoo(...) / pkg.NewFoo(...)
+		return constructorReturnType(e.Fun, ctx)
+	}
+	return ""
+}
+
+// compositeLitType returns the qualified type name of a composite literal, or ""
+// when the literal has no named type (e.g. slice/map literals).
+func compositeLitType(cl *ast.CompositeLit, ctx resolveCtx) string {
+	if cl.Type == nil {
+		return ""
+	}
+	typeStr := typeExprToString(cl.Type)
+	if typeStr == "" {
+		return ""
+	}
+	return resolveTypeName(typeStr, ctx)
+}
+
+// constructorReturnType infers the qualified return type of a call following the
+// `New<Type>` convention (e.g. `NewService()` → "pkgDir.Service",
+// `auth.NewClient()` → "internal/auth.Client"). Returns "" otherwise.
+func constructorReturnType(fun ast.Expr, ctx resolveCtx) string {
+	switch f := fun.(type) {
+	case *ast.Ident:
+		if t := newConventionType(f.Name); t != "" {
+			return ctx.pkgDir + "." + t
+		}
+	case *ast.SelectorExpr:
+		if x, ok := f.X.(*ast.Ident); ok {
+			if t := newConventionType(f.Sel.Name); t != "" {
+				if importPath, ok := ctx.imports[x.Name]; ok {
+					return importPath + "." + t
+				}
+			}
+		}
+	}
+	return ""
+}
+
+// newConventionType returns the type name implied by a constructor following the
+// `New<Type>` convention (e.g. "NewService" → "Service"), or "" if the name does
+// not follow it (e.g. "New", "Newton").
+func newConventionType(name string) string {
+	rest := strings.TrimPrefix(name, "New")
+	if rest == name || rest == "" {
+		return ""
+	}
+	if !unicode.IsUpper([]rune(rest)[0]) {
+		return ""
+	}
+	return rest
 }
 
 // resolveTypeName converts a raw type string (e.g. "pkg.Type" or "LocalType")
