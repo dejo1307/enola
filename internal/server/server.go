@@ -828,6 +828,9 @@ func (s *Server) resolveNodeName(store *facts.Store, input string) (string, *nam
 // primary repo (base name of Snapshot.Meta.RepoPath), whose service node has
 // Repo == "" and Name == "".
 func (s *Server) resolveRepoLabelToServiceNode(store *facts.Store, input string) (string, bool) {
+	if s.eng == nil {
+		return "", false
+	}
 	services := store.ByKind(facts.KindService)
 	inputLower := strings.ToLower(input)
 

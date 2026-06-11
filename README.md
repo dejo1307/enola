@@ -513,4 +513,10 @@ enola/
 
 ## License
 
-MIT
+Apache License 2.0 — see [`LICENSE`](LICENSE).
+
+## Acknowledgements
+
+enola bundles third-party components under their own licenses. See [`NOTICE`](NOTICE) for the full list.
+
+- **Swift parsing** uses the [tree-sitter-swift](https://github.com/alex-pinkus/tree-sitter-swift) grammar by Alex Pinkus (MIT), vendored under [`internal/extractors/swiftextractor/grammar/`](internal/extractors/swiftextractor/grammar/) — see its [`ATTRIBUTION.md`](internal/extractors/swiftextractor/grammar/ATTRIBUTION.md) and [`LICENSE`](internal/extractors/swiftextractor/grammar/LICENSE).

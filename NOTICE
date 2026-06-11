@@ -1,0 +1,21 @@
+enola
+Copyright (c) Dejan Menges
+
+This product includes third-party software vendored into the source tree under
+their own licenses, listed below.
+
+--------------------------------------------------------------------------------
+
+tree-sitter-swift — Swift grammar for tree-sitter
+  Location: internal/extractors/swiftextractor/grammar/
+  Author:   Alex Pinkus <alex.pinkus@gmail.com>
+  Source:   https://github.com/alex-pinkus/tree-sitter-swift
+  Version:  go module github.com/alex-pinkus/tree-sitter-swift
+            v0.0.0-20260601025047-d42e9bb24646 (commit d42e9bb24646)
+  License:  MIT — see internal/extractors/swiftextractor/grammar/LICENSE
+
+  src/scanner.c, grammar.json and src/node-types.json are vendored verbatim from
+  the upstream project. src/parser.c and src/tree_sitter/*.h are generated from
+  the upstream grammar.json (see that directory's ATTRIBUTION.md for details and
+  the regeneration command). The surrounding cgo glue (binding.go, cgo_parser.c,
+  cgo_scanner.c) is enola's own code and is not part of the upstream grammar.

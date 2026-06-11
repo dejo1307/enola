@@ -22,6 +22,12 @@ ignore:
   - "**/Pods/**"
   - ".build/**"
   - "**/.build/**"
+  # SPM/Xcode build & package artifacts at any depth (basename match — the
+  # **/x/** form above only catches top-level occurrences), plus timestamped
+  # backup dirs like .build.bak-YYYYMMDD / .swiftpm.bak-YYYYMMDD.
+  - "**/.build"
+  - "**/.swiftpm"
+  - "**/*.bak-*"
   # Tests
   - "**/*Tests.swift"
   - "**/*Test.swift"
