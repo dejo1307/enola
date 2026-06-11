@@ -3,6 +3,7 @@ package swiftextractor
 import (
 	"bufio"
 	"context"
+	"io"
 	"log"
 	"os"
 	"path/filepath"
@@ -12,7 +13,8 @@ import (
 	"github.com/enola-labs/enola/internal/facts"
 )
 
-// SwiftExtractor extracts architectural facts from Swift source code using line-based regex parsing.
+// SwiftExtractor extracts architectural facts from Swift source code using
+// tree-sitter AST parsing (see swift_ast.go for the walker implementation).
 type SwiftExtractor struct{}
 
 // New creates a new SwiftExtractor.
@@ -55,20 +57,29 @@ func (e *SwiftExtractor) Detect(repoPath string) (bool, error) {
 	return false, nil
 }
 
-// Extract parses Swift files and emits architectural facts.
+// Extract parses Swift files with tree-sitter and emits architectural facts.
+//
 // It uses a two-pass approach:
-//   - Pass 1: extract declarations and build a type→module index
-//   - Pass 2: resolve type references to discover cross-module dependencies
+//   - Pass 1: walk each file's AST (extractFileAST) to emit declaration, import,
+//     iOS-classification and call-graph facts, while building a type→module index.
+//   - A canonicalisation step rewrites bare call/instantiate/inject/depends_on
+//     edge targets to canonical "<dir>.<Type>" fact names using that index, so
+//     the graph's reverse traversal (impact_analysis) finds Swift dependents.
+//   - Pass 2: scan type references to discover cross-module import dependencies.
 func (e *SwiftExtractor) Extract(ctx context.Context, repoPath string, files []string) ([]facts.Fact, error) {
 	var allFacts []facts.Fact
 
 	isiOS := detectiOSProject(repoPath)
 
 	modules := make(map[string]bool)
-	typeIndex := make(map[string]string) // typeName -> module (directory)
+	typeIndex := make(map[string]string)    // simple type name -> module (directory)
+	dirToFile := make(map[string]string)    // module dir -> a representative source file
 	var swiftFiles []string
+	var manifestFiles []string // Package.swift manifests, parsed after the walk
 
-	// Pass 1: extract declarations and build type index.
+	// Pass 1: AST extraction + type index. Package.swift manifests are deferred so
+	// that dirToFile is fully populated before the manifest parser resolves each
+	// target's representative source file.
 	for _, relFile := range files {
 		select {
 		case <-ctx.Done():
@@ -79,63 +90,71 @@ func (e *SwiftExtractor) Extract(ctx context.Context, repoPath string, files []s
 		if !isSwiftFile(relFile) {
 			continue
 		}
-
+		if filepath.Base(relFile) == "Package.swift" {
+			manifestFiles = append(manifestFiles, relFile)
+			continue
+		}
 		swiftFiles = append(swiftFiles, relFile)
 
 		absFile := filepath.Join(repoPath, relFile)
-		f, err := os.Open(absFile)
+		src, err := os.ReadFile(absFile)
 		if err != nil {
 			log.Printf("[swift-extractor] error reading %s: %v", relFile, err)
 			continue
 		}
 
-		fileFacts := extractFile(f, relFile, isiOS)
-		f.Close()
+		fileFacts := extractFileAST(src, relFile, isiOS)
 		allFacts = append(allFacts, fileFacts...)
 
 		dir := filepath.Dir(relFile)
 		modules[dir] = true
+		if _, ok := dirToFile[dir]; !ok {
+			dirToFile[dir] = relFile
+		}
 
-		// Index declared types for pass 2.
+		// Index declared types so edge targets and cross-module references resolve.
 		for _, fact := range fileFacts {
-			if fact.Kind == facts.KindSymbol {
-				sk, _ := fact.Props["symbol_kind"].(string)
-				if sk == facts.SymbolStruct || sk == facts.SymbolClass || sk == facts.SymbolInterface || sk == "extension" {
-					simpleName := lastDotComponent(fact.Name)
-					if simpleName != "" {
-						typeIndex[simpleName] = dir
-					}
+			if fact.Kind != facts.KindSymbol {
+				continue
+			}
+			sk, _ := fact.Props["symbol_kind"].(string)
+			if sk == facts.SymbolStruct || sk == facts.SymbolClass || sk == facts.SymbolInterface {
+				if simpleName := lastDotComponent(fact.Name); simpleName != "" {
+					typeIndex[simpleName] = dir
 				}
 			}
 		}
 	}
 
-	// Post-process: emit View→ViewModel depends_on relations.
-	// Scan SwiftUI View signatures for @StateObject/@ObservedObject/@EnvironmentObject references.
-	viewModelDepRe := regexp.MustCompile(`@(?:StateObject|ObservedObject|EnvironmentObject)\s+(?:var|let)\s+\w+\s*:\s*(\w+)`)
-	for i := range allFacts {
-		comp, _ := allFacts[i].Props["ios_component"].(string)
-		if comp != "swiftui_view" {
+	// Parse Package.swift manifests: emit SPM target module facts + the inter-target
+	// dependency graph, and (by rerouting) keep the manifest's own `let package`
+	// binding and `import PackageDescription` out of the symbol/dependency facts.
+	manifestModules := make(map[string]bool)
+	for _, relFile := range manifestFiles {
+		absFile := filepath.Join(repoPath, relFile)
+		src, err := os.ReadFile(absFile)
+		if err != nil {
+			log.Printf("[swift-extractor] error reading %s: %v", relFile, err)
 			continue
 		}
-		sig, _ := allFacts[i].Props["signature"].(string)
-		if sig == "" {
-			continue
-		}
-		matches := viewModelDepRe.FindAllStringSubmatch(sig, -1)
-		for _, m := range matches {
-			vmType := m[1]
-			if targetModule, ok := typeIndex[vmType]; ok {
-				allFacts[i].Relations = append(allFacts[i].Relations, facts.Relation{
-					Kind:   facts.RelDependsOn,
-					Target: targetModule + "." + vmType,
-				})
+		mf := parsePackageManifest(src, relFile, dirToFile)
+		allFacts = append(allFacts, mf...)
+		for _, f := range mf {
+			if f.Kind == facts.KindModule {
+				manifestModules[f.Name] = true
 			}
 		}
 	}
 
-	// Emit module facts.
+	// Canonicalise bare edge targets to "<dir>.<Type>" so reverse traversal
+	// (impact_analysis) connects dependents to their targets.
+	canonicalizeTargets(allFacts, typeIndex)
+
+	// Emit module facts for directories not already described by a manifest target.
 	for dir := range modules {
+		if manifestModules[dir] {
+			continue
+		}
 		allFacts = append(allFacts, facts.Fact{
 			Kind: facts.KindModule,
 			Name: dir,
@@ -189,6 +208,41 @@ func (e *SwiftExtractor) Extract(ctx context.Context, repoPath string, files []s
 
 	return allFacts, nil
 }
+
+// canonicalizeTargets rewrites bare simple-name targets of call-graph relations
+// to their canonical "<dir>.<Type>" fact names using the type index. Targets that
+// already contain "." (resolved methods/functions) or that name an unknown
+// (external) type are left unchanged.
+func canonicalizeTargets(allFacts []facts.Fact, typeIndex map[string]string) {
+	for i := range allFacts {
+		for j := range allFacts[i].Relations {
+			r := &allFacts[i].Relations[j]
+			switch r.Kind {
+			case facts.RelInstantiates, facts.RelInjects, facts.RelCalls, facts.RelDependsOn:
+				if strings.Contains(r.Target, ".") {
+					continue
+				}
+				if dir, ok := typeIndex[r.Target]; ok {
+					r.Target = dir + "." + r.Target
+				}
+			}
+		}
+	}
+}
+
+// extractFile reads a Swift file and delegates to the tree-sitter walker. It
+// preserves the legacy signature used by the test helper extractFromString.
+func extractFile(f *os.File, relFile string, isiOS bool) []facts.Fact {
+	src, err := io.ReadAll(f)
+	if err != nil {
+		return nil
+	}
+	return extractFileAST(src, relFile, isiOS)
+}
+
+// importRe matches a Swift import statement and captures the module name. Used by
+// the AST walker to render import dependency facts.
+var importRe = regexp.MustCompile(`^\s*import\s+(\w+)`)
 
 // typeRefRe matches type annotations like "name: TypeName" in property declarations and parameters.
 var typeRefRe = regexp.MustCompile(`:\s*([A-Z][A-Za-z0-9_]+)`)
@@ -268,627 +322,11 @@ func lastDotComponent(name string) string {
 	return name
 }
 
-// --- Regex patterns ---
-
-var (
-	importRe    = regexp.MustCompile(`^\s*import\s+(\w+)`)
-	attributeRe = regexp.MustCompile(`^\s*@(\w+)`)
-
-	// Protocol declarations.
-	protocolRe = regexp.MustCompile(
-		`^\s*((?:(?:public|private|fileprivate|internal|open)\s+)*)` +
-			`protocol\s+(\w+)`)
-
-	// Struct declarations.
-	structRe = regexp.MustCompile(
-		`^\s*((?:(?:@\w+\s+)*(?:public|private|fileprivate|internal|open)\s+)*)` +
-			`struct\s+(\w+)`)
-
-	// Class declarations (handles @MainActor final class, etc.).
-	classRe = regexp.MustCompile(
-		`^\s*((?:(?:@\w+\s+)*(?:public|private|fileprivate|internal|open|final)\s+)*)` +
-			`class\s+(\w+)`)
-
-	// Enum declarations.
-	enumRe = regexp.MustCompile(
-		`^\s*((?:(?:public|private|fileprivate|internal|open|indirect)\s+)*)` +
-			`enum\s+(\w+)`)
-
-	// Actor declarations.
-	actorRe = regexp.MustCompile(
-		`^\s*((?:(?:@\w+\s+)*(?:public|private|fileprivate|internal|open)\s+)*)` +
-			`actor\s+(\w+)`)
-
-	// Extension declarations.
-	extensionRe = regexp.MustCompile(`^\s*extension\s+(\w+)`)
-
-	// Function declarations.
-	funcRe = regexp.MustCompile(
-		`^\s*(?:(?:public|private|fileprivate|internal|open|override|static|class|mutating|nonmutating|@\w+\s+)*\s*)` +
-			`func\s+(\w+)\s*[(<]`)
-
-	// Property declarations (let/var).
-	propRe = regexp.MustCompile(
-		`^\s*(?:(?:public|private|fileprivate|internal|open|static|class|override|lazy|weak|unowned|@\w+\s+)*\s*)` +
-			`(let|var)\s+(\w+)`)
-
-	// Typealias declarations.
-	typealiasRe = regexp.MustCompile(
-		`^\s*(?:(?:public|private|fileprivate|internal)\s+)*` +
-			`typealias\s+(\w+)`)
-
-	// Visibility check — private or fileprivate means not exported.
-	// private(set) is handled separately in isPrivateAccess to keep the property exported.
-	privateRe    = regexp.MustCompile(`\b(private|fileprivate)\b`)
-	privateSetRe = regexp.MustCompile(`\b(private|fileprivate)\s*\(set\)`)
-)
-
-// pendingDecl tracks a declaration that spans multiple lines (e.g., multi-line where clause or generics).
-type pendingDecl struct {
-	declType    string // "struct", "class", "enum", "protocol", "actor"
-	modifiers   string
-	name        string
-	line        int
-	annotations []string
-	parenDepth  int    // tracks unclosed parentheses
-	angleDepth  int    // tracks unclosed angle brackets
-	lines       string // accumulated text after the name
-}
-
-// extractFile parses a single Swift file and returns facts.
-func extractFile(f *os.File, relFile string, isiOS bool) []facts.Fact {
-	var result []facts.Fact
-	dir := filepath.Dir(relFile)
-
-	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 0, 256*1024), 1024*1024)
-
-	var (
-		lineNum            int
-		braceDepth         int
-		pendingAnnotations []string
-		pending            *pendingDecl
-		// Signature capture: collect member declarations for the current top-level type.
-		sigCapture    bool
-		sigTypeIdx    int
-		sigMembers    []string
-		sigPublished  []string // tracks @Published property names
-	)
-	const sigMaxMembers = 15
-
-	for scanner.Scan() {
-		lineNum++
-		line := scanner.Text()
-
-		// Track brace depth for top-level detection.
-		braceDepth += strings.Count(line, "{") - strings.Count(line, "}")
-
-		// Finalize signature when we exit the type body.
-		if sigCapture && braceDepth == 0 {
-			if sigTypeIdx < len(result) {
-				if len(sigMembers) > 0 {
-					result[sigTypeIdx].Props["signature"] = strings.Join(sigMembers, "\n")
-				}
-				if len(sigPublished) > 0 {
-					result[sigTypeIdx].Props["reactive"] = true
-					result[sigTypeIdx].Props["published_properties"] = strings.Join(sigPublished, ",")
-				}
-			}
-			sigCapture = false
-			sigMembers = nil
-			sigPublished = nil
-		}
-
-		// Capture member declarations inside a top-level type body.
-		if sigCapture && braceDepth >= 1 {
-			memberEffective := braceDepth - strings.Count(line, "{")
-			if memberEffective == 1 && len(sigMembers) < sigMaxMembers {
-				trimmed := strings.TrimSpace(line)
-				if trimmed != "" && !strings.HasPrefix(trimmed, "//") &&
-					!strings.HasPrefix(trimmed, "/*") && !strings.HasPrefix(trimmed, "*") {
-					if propRe.MatchString(line) || funcRe.MatchString(line) {
-						sig := trimmed
-						if idx := strings.Index(sig, "{"); idx > 0 {
-							sig = strings.TrimSpace(sig[:idx])
-						}
-						sigMembers = append(sigMembers, sig)
-						// Track @Published properties for reactive detection.
-						if strings.Contains(trimmed, "@Published") {
-							if pm := propRe.FindStringSubmatch(line); pm != nil {
-								sigPublished = append(sigPublished, pm[2])
-							}
-						}
-					}
-				}
-			}
-		}
-
-		// If we have a pending multi-line declaration, accumulate lines.
-		if pending != nil {
-			pending.parenDepth += strings.Count(line, "(") - strings.Count(line, ")")
-			pending.angleDepth += strings.Count(line, "<") - strings.Count(line, ">")
-			pending.lines += " " + strings.TrimSpace(line)
-
-			// Once balanced and we see { or end of declaration, emit the fact.
-			if (pending.parenDepth <= 0 && pending.angleDepth <= 0) || strings.Contains(line, "{") {
-				supertypes := extractSupertypesFromText(pending.lines)
-				fact := buildDeclFact(dir, relFile, pending, supertypes, isiOS)
-				result = append(result, fact)
-				sigCapture = true
-				sigTypeIdx = len(result) - 1
-				sigMembers = nil
-				sigPublished = nil
-				pending = nil
-			}
-			continue
-		}
-
-		// Collect attributes on their own line (apply to the next declaration).
-		if m := attributeRe.FindStringSubmatch(line); m != nil {
-			trimmed := strings.TrimSpace(line)
-			if strings.HasPrefix(trimmed, "@") && !isDeclarationLine(line) {
-				pendingAnnotations = append(pendingAnnotations, m[1])
-				continue
-			}
-		}
-
-		effectiveDepth := braceDepth - strings.Count(line, "{")
-
-		inlineAnnotations := collectInlineAnnotations(line)
-		allAnnotations := append(pendingAnnotations, inlineAnnotations...)
-
-		if effectiveDepth == 0 {
-			// Import statements.
-			if m := importRe.FindStringSubmatch(line); m != nil {
-				importName := m[1]
-				result = append(result, facts.Fact{
-					Kind: facts.KindDependency,
-					Name: dir + " -> " + importName,
-					File: relFile,
-					Line: lineNum,
-					Props: map[string]any{
-						"language": "swift",
-					},
-					Relations: []facts.Relation{
-						{Kind: facts.RelImports, Target: importName},
-					},
-				})
-				pendingAnnotations = nil
-				continue
-			}
-
-			// Protocol declarations.
-			if m := protocolRe.FindStringSubmatch(line); m != nil {
-				modifiers := m[1]
-				name := m[2]
-
-				exported := !isPrivateAccess(modifiers)
-
-				pf := facts.Fact{
-					Kind: facts.KindSymbol,
-					Name: dir + "." + name,
-					File: relFile,
-					Line: lineNum,
-					Props: map[string]any{
-						"symbol_kind": facts.SymbolInterface,
-						"exported":    exported,
-						"language":    "swift",
-					},
-					Relations: []facts.Relation{
-						{Kind: facts.RelDeclares, Target: dir},
-					},
-				}
-
-				// Extract protocol inheritance.
-				if colonIdx := strings.Index(line, ":"); colonIdx >= 0 {
-					rest := line[colonIdx+1:]
-					if braceIdx := strings.Index(rest, "{"); braceIdx >= 0 {
-						rest = rest[:braceIdx]
-					}
-					rest = strings.TrimSpace(rest)
-					if rest != "" {
-						for _, st := range parseSupertypes(rest) {
-							pf.Relations = append(pf.Relations, facts.Relation{
-								Kind:   facts.RelImplements,
-								Target: st,
-							})
-						}
-					}
-				}
-
-				if isiOS {
-					addIOSProps(&pf, name, allAnnotations, "")
-				}
-
-				result = append(result, pf)
-				sigCapture = true
-				sigTypeIdx = len(result) - 1
-				sigMembers = nil
-				sigPublished = nil
-				pendingAnnotations = nil
-				continue
-			}
-
-			// Struct declarations.
-			if m := structRe.FindStringSubmatch(line); m != nil {
-				modifiers := m[1]
-				name := m[2]
-
-				nameIdx := strings.Index(line, "struct "+name)
-				restOfLine := line[nameIdx+len("struct ")+len(name):]
-
-				parenDepth := strings.Count(restOfLine, "(") - strings.Count(restOfLine, ")")
-				angleDepth := strings.Count(restOfLine, "<") - strings.Count(restOfLine, ">")
-
-				if (parenDepth > 0 || angleDepth > 0) && !strings.Contains(line, "{") {
-					pending = &pendingDecl{
-						declType:    "struct",
-						modifiers:   modifiers,
-						name:        name,
-						line:        lineNum,
-						annotations: append([]string{}, allAnnotations...),
-						parenDepth:  parenDepth,
-						angleDepth:  angleDepth,
-						lines:       restOfLine,
-					}
-					pendingAnnotations = nil
-					continue
-				}
-
-				supertypes := extractSupertypesFromText(restOfLine)
-				pc := &pendingDecl{
-					declType:    "struct",
-					modifiers:   modifiers,
-					name:        name,
-					line:        lineNum,
-					annotations: allAnnotations,
-				}
-				fact := buildDeclFact(dir, relFile, pc, supertypes, isiOS)
-				result = append(result, fact)
-				sigCapture = true
-				sigTypeIdx = len(result) - 1
-				sigMembers = nil
-				sigPublished = nil
-				pendingAnnotations = nil
-				continue
-			}
-
-			// Class declarations.
-			if m := classRe.FindStringSubmatch(line); m != nil {
-				modifiers := m[1]
-				name := m[2]
-
-				nameIdx := strings.Index(line, "class "+name)
-				restOfLine := line[nameIdx+len("class ")+len(name):]
-
-				parenDepth := strings.Count(restOfLine, "(") - strings.Count(restOfLine, ")")
-				angleDepth := strings.Count(restOfLine, "<") - strings.Count(restOfLine, ">")
-
-				if (parenDepth > 0 || angleDepth > 0) && !strings.Contains(line, "{") {
-					pending = &pendingDecl{
-						declType:    "class",
-						modifiers:   modifiers,
-						name:        name,
-						line:        lineNum,
-						annotations: append([]string{}, allAnnotations...),
-						parenDepth:  parenDepth,
-						angleDepth:  angleDepth,
-						lines:       restOfLine,
-					}
-					pendingAnnotations = nil
-					continue
-				}
-
-				supertypes := extractSupertypesFromText(restOfLine)
-				pc := &pendingDecl{
-					declType:    "class",
-					modifiers:   modifiers,
-					name:        name,
-					line:        lineNum,
-					annotations: allAnnotations,
-				}
-				fact := buildDeclFact(dir, relFile, pc, supertypes, isiOS)
-				result = append(result, fact)
-				sigCapture = true
-				sigTypeIdx = len(result) - 1
-				sigMembers = nil
-				sigPublished = nil
-				pendingAnnotations = nil
-				continue
-			}
-
-			// Enum declarations.
-			if m := enumRe.FindStringSubmatch(line); m != nil {
-				modifiers := m[1]
-				name := m[2]
-
-				nameIdx := strings.Index(line, "enum "+name)
-				restOfLine := line[nameIdx+len("enum ")+len(name):]
-
-				parenDepth := strings.Count(restOfLine, "(") - strings.Count(restOfLine, ")")
-				angleDepth := strings.Count(restOfLine, "<") - strings.Count(restOfLine, ">")
-
-				if (parenDepth > 0 || angleDepth > 0) && !strings.Contains(line, "{") {
-					pending = &pendingDecl{
-						declType:    "enum",
-						modifiers:   modifiers,
-						name:        name,
-						line:        lineNum,
-						annotations: append([]string{}, allAnnotations...),
-						parenDepth:  parenDepth,
-						angleDepth:  angleDepth,
-						lines:       restOfLine,
-					}
-					pendingAnnotations = nil
-					continue
-				}
-
-				supertypes := extractSupertypesFromText(restOfLine)
-				pc := &pendingDecl{
-					declType:    "enum",
-					modifiers:   modifiers,
-					name:        name,
-					line:        lineNum,
-					annotations: allAnnotations,
-				}
-				fact := buildDeclFact(dir, relFile, pc, supertypes, isiOS)
-				result = append(result, fact)
-				sigCapture = true
-				sigTypeIdx = len(result) - 1
-				sigMembers = nil
-				sigPublished = nil
-				pendingAnnotations = nil
-				continue
-			}
-
-			// Actor declarations.
-			if m := actorRe.FindStringSubmatch(line); m != nil {
-				modifiers := m[1]
-				name := m[2]
-
-				nameIdx := strings.Index(line, "actor "+name)
-				restOfLine := line[nameIdx+len("actor ")+len(name):]
-
-				parenDepth := strings.Count(restOfLine, "(") - strings.Count(restOfLine, ")")
-				angleDepth := strings.Count(restOfLine, "<") - strings.Count(restOfLine, ">")
-
-				if (parenDepth > 0 || angleDepth > 0) && !strings.Contains(line, "{") {
-					pending = &pendingDecl{
-						declType:    "actor",
-						modifiers:   modifiers,
-						name:        name,
-						line:        lineNum,
-						annotations: append([]string{}, allAnnotations...),
-						parenDepth:  parenDepth,
-						angleDepth:  angleDepth,
-						lines:       restOfLine,
-					}
-					pendingAnnotations = nil
-					continue
-				}
-
-				supertypes := extractSupertypesFromText(restOfLine)
-				pc := &pendingDecl{
-					declType:    "actor",
-					modifiers:   modifiers,
-					name:        name,
-					line:        lineNum,
-					annotations: allAnnotations,
-				}
-				fact := buildDeclFact(dir, relFile, pc, supertypes, isiOS)
-				result = append(result, fact)
-				sigCapture = true
-				sigTypeIdx = len(result) - 1
-				sigMembers = nil
-				sigPublished = nil
-				pendingAnnotations = nil
-				continue
-			}
-
-			// Extension declarations — emit implements relations only.
-			if m := extensionRe.FindStringSubmatch(line); m != nil {
-				name := m[1]
-
-				if colonIdx := strings.Index(line, ":"); colonIdx >= 0 {
-					rest := line[colonIdx+1:]
-					if braceIdx := strings.Index(rest, "{"); braceIdx >= 0 {
-						rest = rest[:braceIdx]
-					}
-					rest = strings.TrimSpace(rest)
-					if rest != "" {
-						for _, st := range parseSupertypes(rest) {
-							result = append(result, facts.Fact{
-								Kind: facts.KindSymbol,
-								Name: dir + "." + name + "+" + st,
-								File: relFile,
-								Line: lineNum,
-								Props: map[string]any{
-									"symbol_kind": "extension",
-									"exported":    true,
-									"language":    "swift",
-								},
-								Relations: []facts.Relation{
-									{Kind: facts.RelDeclares, Target: dir},
-									{Kind: facts.RelImplements, Target: st},
-								},
-							})
-						}
-					}
-				}
-				pendingAnnotations = nil
-				continue
-			}
-
-			// Function declarations.
-			if m := funcRe.FindStringSubmatch(line); m != nil {
-				name := m[1]
-
-				exported := !isPrivateAccess(line)
-
-				ff := facts.Fact{
-					Kind: facts.KindSymbol,
-					Name: dir + "." + name,
-					File: relFile,
-					Line: lineNum,
-					Props: map[string]any{
-						"symbol_kind": facts.SymbolFunc,
-						"exported":    exported,
-						"language":    "swift",
-					},
-					Relations: []facts.Relation{
-						{Kind: facts.RelDeclares, Target: dir},
-					},
-				}
-
-				if strings.Contains(line, " async") {
-					ff.Props["async"] = true
-				}
-				if strings.Contains(line, " throws") {
-					ff.Props["throws"] = true
-				}
-				if strings.Contains(line, "nonisolated") {
-					ff.Props["nonisolated"] = true
-				}
-				if strings.Contains(line, "@MainActor") {
-					ff.Props["main_actor"] = true
-				}
-
-				result = append(result, ff)
-				pendingAnnotations = nil
-				continue
-			}
-
-			// Property declarations (let/var).
-			if m := propRe.FindStringSubmatch(line); m != nil {
-				letOrVar := m[1]
-				name := m[2]
-
-				if name == "_" {
-					pendingAnnotations = nil
-					continue
-				}
-
-				exported := !isPrivateAccess(line)
-
-				symbolKind := facts.SymbolVariable
-				if letOrVar == "let" {
-					symbolKind = facts.SymbolConstant
-				}
-
-				result = append(result, facts.Fact{
-					Kind: facts.KindSymbol,
-					Name: dir + "." + name,
-					File: relFile,
-					Line: lineNum,
-					Props: map[string]any{
-						"symbol_kind": symbolKind,
-						"exported":    exported,
-						"language":    "swift",
-					},
-					Relations: []facts.Relation{
-						{Kind: facts.RelDeclares, Target: dir},
-					},
-				})
-				pendingAnnotations = nil
-				continue
-			}
-
-			// Typealias declarations.
-			if m := typealiasRe.FindStringSubmatch(line); m != nil {
-				name := m[1]
-				exported := !isPrivateAccess(line)
-
-				result = append(result, facts.Fact{
-					Kind: facts.KindSymbol,
-					Name: dir + "." + name,
-					File: relFile,
-					Line: lineNum,
-					Props: map[string]any{
-						"symbol_kind": facts.SymbolType,
-						"exported":    exported,
-						"language":    "swift",
-					},
-					Relations: []facts.Relation{
-						{Kind: facts.RelDeclares, Target: dir},
-					},
-				})
-				pendingAnnotations = nil
-				continue
-			}
-		}
-
-		// Reset pending annotations if we hit a non-annotation, non-blank, non-comment line that wasn't a declaration.
-		trimmed := strings.TrimSpace(line)
-		if trimmed != "" && !strings.HasPrefix(trimmed, "//") && !strings.HasPrefix(trimmed, "*") && !strings.HasPrefix(trimmed, "/*") && !strings.HasPrefix(trimmed, "@") {
-			pendingAnnotations = nil
-		}
-	}
-
-	return result
-}
-
-// buildDeclFact creates a symbol fact for a struct/class/enum/protocol declaration.
-func buildDeclFact(dir, relFile string, pd *pendingDecl, supertypes string, isiOS bool) facts.Fact {
-	symbolKind := facts.SymbolClass
-	switch pd.declType {
-	case "struct":
-		symbolKind = facts.SymbolStruct
-	case "protocol":
-		symbolKind = facts.SymbolInterface
-	case "enum":
-		symbolKind = facts.SymbolClass // enums map to class with enum=true
-	case "actor":
-		symbolKind = facts.SymbolClass // actors are reference types like classes
-	}
-
-	exported := !isPrivateAccess(pd.modifiers)
-
-	f := facts.Fact{
-		Kind: facts.KindSymbol,
-		Name: dir + "." + pd.name,
-		File: relFile,
-		Line: pd.line,
-		Props: map[string]any{
-			"symbol_kind": symbolKind,
-			"exported":    exported,
-			"language":    "swift",
-		},
-		Relations: []facts.Relation{
-			{Kind: facts.RelDeclares, Target: dir},
-		},
-	}
-
-	if pd.declType == "enum" {
-		f.Props["enum"] = true
-	}
-	if pd.declType == "actor" {
-		f.Props["concurrency"] = "actor"
-	}
-	if strings.Contains(pd.modifiers, "final") {
-		f.Props["final"] = true
-	}
-	if containsAnnotation(pd.annotations, "MainActor") {
-		f.Props["main_actor"] = true
-	}
-
-	if supertypes != "" {
-		for _, st := range parseSupertypes(supertypes) {
-			f.Relations = append(f.Relations, facts.Relation{
-				Kind:   facts.RelImplements,
-				Target: st,
-			})
-		}
-	}
-
-	if isiOS {
-		addIOSProps(&f, pd.name, pd.annotations, supertypes)
-	}
-
-	return f
-}
-
 // extractSupertypesFromText finds the supertype clause after ":" in text that may
 // contain generic parameters. It skips content inside balanced parentheses and angle brackets.
+//
+// It is retained for direct unit testing of the supertype-clause parsing logic;
+// the AST walker reads supertypes structurally from inheritance_specifier nodes.
 func extractSupertypesFromText(text string) string {
 	depth := 0
 	for i, ch := range text {
@@ -1080,17 +518,6 @@ func extractTypeName(s string) string {
 	return s
 }
 
-// collectInlineAnnotations extracts attribute names from a line that also contains a declaration.
-func collectInlineAnnotations(line string) []string {
-	var result []string
-	re := regexp.MustCompile(`@(\w+)`)
-	matches := re.FindAllStringSubmatch(line, -1)
-	for _, m := range matches {
-		result = append(result, m[1])
-	}
-	return result
-}
-
 func containsAnnotation(annotations []string, name string) bool {
 	for _, a := range annotations {
 		if a == name {
@@ -1115,6 +542,12 @@ func supertypeMatches(supertypes string, names ...string) bool {
 	return false
 }
 
+// privateRe / privateSetRe support isPrivateAccess.
+var (
+	privateRe    = regexp.MustCompile(`\b(private|fileprivate)\b`)
+	privateSetRe = regexp.MustCompile(`\b(private|fileprivate)\s*\(set\)`)
+)
+
 // isPrivateAccess returns true if the text contains private or fileprivate access control
 // that is NOT the private(set) pattern (which only restricts the setter, keeping the getter public).
 func isPrivateAccess(text string) bool {
@@ -1128,14 +561,6 @@ func isPrivateAccess(text string) bool {
 
 func isSwiftFile(path string) bool {
 	return strings.HasSuffix(strings.ToLower(path), ".swift")
-}
-
-// isDeclarationLine checks if a line contains a Swift declaration keyword.
-func isDeclarationLine(line string) bool {
-	return funcRe.MatchString(line) || classRe.MatchString(line) ||
-		structRe.MatchString(line) || enumRe.MatchString(line) ||
-		protocolRe.MatchString(line) || extensionRe.MatchString(line) ||
-		actorRe.MatchString(line)
 }
 
 func matchesXcodeProject(name string) bool {
