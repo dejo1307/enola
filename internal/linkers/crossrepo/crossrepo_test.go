@@ -79,16 +79,29 @@ func serviceNodes(out []facts.Fact) []string {
 	return names
 }
 
+// crossRepoEdges returns the consumer->provider dependency (evidence) facts —
+// the actual cross-repo edges. Service nodes (which now exist for every loaded
+// repo) are excluded, so this measures "did a link form?".
+func crossRepoEdges(out []facts.Fact) []facts.Fact {
+	var edges []facts.Fact
+	for _, f := range out {
+		if f.Kind == facts.KindDependency {
+			edges = append(edges, f)
+		}
+	}
+	return edges
+}
+
 // --- normalization ---
 
 func TestNormalizePath(t *testing.T) {
 	cases := map[string]string{
-		"/api/items/{id}":  "/api/items/{}",
-		"/api/items/:id":   "/api/items/{}",
-		"/api/items/<id>":  "/api/items/{}",
-		"/api/items/":      "/api/items",
-		"/api/items":       "/api/items",
-		"/":                "/",
+		"/api/items/{id}":         "/api/items/{}",
+		"/api/items/:id":          "/api/items/{}",
+		"/api/items/<id>":         "/api/items/{}",
+		"/api/items/":             "/api/items",
+		"/api/items":              "/api/items",
+		"/":                       "/",
 		"/users/{uid}/pets/{pid}": "/users/{}/pets/{}",
 	}
 	for in, want := range cases {
@@ -169,8 +182,8 @@ func TestComputeLinks_HTTPGenericPathSkipped(t *testing.T) {
 		clientRoute("svc-alpha", "/health", "GET", nil),
 		serverRoute("svc-beta", "/health", "GET"),
 	}
-	if out := ComputeLinks(in); len(out) != 0 {
-		t.Errorf("generic path produced links: %+v", out)
+	if edges := crossRepoEdges(ComputeLinks(in)); len(edges) != 0 {
+		t.Errorf("generic path produced edges: %+v", edges)
 	}
 }
 
@@ -244,12 +257,12 @@ func TestComputeLinks_ImportRubyStyle(t *testing.T) {
 
 func TestComputeLinks_ImportRelativeAndSelfIgnored(t *testing.T) {
 	in := []facts.Fact{
-		importDep("svc-alpha", "./local/thing"),      // relative — skip
-		importDep("svc-alpha", "svc-alpha/inner"),    // self — skip
+		importDep("svc-alpha", "./local/thing"),   // relative — skip
+		importDep("svc-alpha", "svc-alpha/inner"), // self — skip
 		facts.Fact{Kind: facts.KindModule, Name: "x", Repo: "lib-core"},
 	}
-	if out := ComputeLinks(in); len(out) != 0 {
-		t.Errorf("relative/self imports produced links: %+v", out)
+	if edges := crossRepoEdges(ComputeLinks(in)); len(edges) != 0 {
+		t.Errorf("relative/self imports produced edges: %+v", edges)
 	}
 }
 
@@ -285,5 +298,79 @@ func TestComputeLinks_SingleRepoNoLinks(t *testing.T) {
 	}
 	if out := ComputeLinks(in); out != nil {
 		t.Errorf("single repo produced links: %+v", out)
+	}
+}
+
+// --- (A) suffix-aware HTTP matching ---
+
+func TestComputeLinks_HTTPSuffixMatch(t *testing.T) {
+	// golf serves the full /api/settings path; consumers call it with varying
+	// prefixes (Swift base-relative, Kotlin/TS with /api). All must link to golf.
+	in := []facts.Fact{
+		serverRoute("golf", "/api/settings/entitlements/definitions", "GET"),
+		clientRoute("ios", "settings/entitlements/definitions", "GET", nil), // base-relative, no slash
+		clientRoute("android", "/api/settings/entitlements/definitions", "GET", nil),
+		clientRoute("golf-ui", "/settings/entitlements/definitions", "GET", nil), // leading slash, no /api
+	}
+	out := ComputeLinks(in)
+	for _, consumer := range []string{"ios", "android", "golf-ui"} {
+		if findEdge(out, consumer, "golf") == nil {
+			t.Errorf("%s did not link to golf via suffix match; out=%+v", consumer, out)
+		}
+		if !hasServiceEdge(out, consumer, "golf") {
+			t.Errorf("%s service node missing depends_on golf", consumer)
+		}
+	}
+}
+
+func TestComputeLinks_HTTPSuffixMinSegments(t *testing.T) {
+	// A single trailing segment is below minSharedSegments → no link.
+	in := []facts.Fact{
+		serverRoute("golf", "/api/settings/definitions", "GET"),
+		clientRoute("ios", "definitions", "GET", nil),
+	}
+	if edges := crossRepoEdges(ComputeLinks(in)); len(edges) != 0 {
+		t.Errorf("single-segment suffix should not link: %+v", edges)
+	}
+}
+
+func TestComputeLinks_HTTPSuffixMethodMismatch(t *testing.T) {
+	in := []facts.Fact{
+		serverRoute("golf", "/api/settings/feedback", "GET"),
+		clientRoute("golf-ui", "settings/feedback", "POST", nil),
+	}
+	if edges := crossRepoEdges(ComputeLinks(in)); len(edges) != 0 {
+		t.Errorf("method mismatch should not link: %+v", edges)
+	}
+}
+
+// --- (A2) per-repo service nodes ---
+
+func TestComputeLinks_PerRepoServiceNodes(t *testing.T) {
+	// Five loaded repos but only one real edge (golf -> go-auth import). Every
+	// repo must still get an addressable service node; edgeless ones carry no
+	// depends_on relations.
+	in := []facts.Fact{
+		importDep("golf", "github.com/x/go-auth/adapters"),
+		facts.Fact{Kind: facts.KindModule, Name: "adapters", Repo: "go-auth"},
+		facts.Fact{Kind: facts.KindModule, Name: "src/ui", Repo: "golf-ui"},
+		facts.Fact{Kind: facts.KindModule, Name: "app", Repo: "android"},
+		facts.Fact{Kind: facts.KindModule, Name: "App", Repo: "ios"},
+	}
+	out := ComputeLinks(in)
+
+	got := serviceNodes(out)
+	want := []string{"android", "go-auth", "golf", "golf-ui", "ios"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("service nodes = %v, want %v", got, want)
+	}
+	if findEdge(out, "golf", "go-auth") == nil {
+		t.Errorf("expected the golf -> go-auth import edge to remain")
+	}
+	// An edgeless repo's service node has no depends_on relations.
+	for _, f := range out {
+		if f.Kind == facts.KindService && f.Name == "golf-ui" && len(f.Relations) != 0 {
+			t.Errorf("isolated repo golf-ui should have no relations, got %+v", f.Relations)
+		}
 	}
 }

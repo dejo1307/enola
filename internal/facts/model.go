@@ -36,6 +36,7 @@ const (
 	RelDependsOn    = "depends_on"
 	RelInstantiates = "instantiates" // Source constructs an instance of target via a constructor call.
 	RelInjects      = "injects"      // Source declares target as a DI-injected constructor parameter.
+	RelHasMethod    = "has_method"   // Owner type (struct/interface/class) declares target as a method. Synthesized in NewGraph.
 )
 
 // Symbol kind property values.
@@ -69,9 +70,9 @@ type Evidence struct {
 
 // Artifact represents a generated output file.
 type Artifact struct {
-	Name    string `json:"name"`    // e.g. "llm_context.md"
-	Content []byte `json:"-"`       // Raw content
-	Type    string `json:"type"`    // MIME type hint
+	Name    string `json:"name"` // e.g. "llm_context.md"
+	Content []byte `json:"-"`    // Raw content
+	Type    string `json:"type"` // MIME type hint
 }
 
 // Snapshot holds the complete result of an analysis run.
@@ -84,15 +85,15 @@ type Snapshot struct {
 
 // SnapshotMeta contains metadata about a snapshot generation run.
 type SnapshotMeta struct {
-	RepoPath    string     `json:"repo_path"`
-	GeneratedAt string     `json:"generated_at"`
-	Duration    string     `json:"duration"`
-	Extractors  []string   `json:"extractors"`
-	Explainers  []string   `json:"explainers"`
-	Renderers   []string   `json:"renderers"`
-	FileHashes  []FileHash `json:"file_hashes,omitempty"`
-	FactCount   int        `json:"fact_count"`
-	InsightCount int       `json:"insight_count"`
+	RepoPath     string     `json:"repo_path"`
+	GeneratedAt  string     `json:"generated_at"`
+	Duration     string     `json:"duration"`
+	Extractors   []string   `json:"extractors"`
+	Explainers   []string   `json:"explainers"`
+	Renderers    []string   `json:"renderers"`
+	FileHashes   []FileHash `json:"file_hashes,omitempty"`
+	FactCount    int        `json:"fact_count"`
+	InsightCount int        `json:"insight_count"`
 }
 
 // FileHash tracks a file's content hash for incremental updates.

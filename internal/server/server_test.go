@@ -1084,7 +1084,9 @@ func TestResolveNodeName_ConfidentSuffixExact(t *testing.T) {
 	srv := newTestServer(store)
 
 	// "Query" hits internal/facts.Store.Query and internal/server.handleQuery,
-	// but only the former's last segment equals "Query" — a confident pick.
+	// but only the former's last segment equals "Query" — a confident pick that is
+	// auto-resolved, with the resolution surfaced (Matched + high confidence) for
+	// transparency rather than silently.
 	name, res, err := srv.resolveNodeName(store, "Query")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -1092,8 +1094,14 @@ func TestResolveNodeName_ConfidentSuffixExact(t *testing.T) {
 	if name != "internal/facts.Store.Query" {
 		t.Errorf("matched = %q, want internal/facts.Store.Query", name)
 	}
-	if res != nil {
-		t.Errorf("expected nil resolution for confident suffix match, got %+v", res)
+	if res == nil || res.Matched != "internal/facts.Store.Query" {
+		t.Fatalf("expected an auto-pick resolution naming the match, got %+v", res)
+	}
+	if !res.AutoPicked {
+		t.Error("a confident unique-suffix pick should be marked AutoPicked")
+	}
+	if res.Confidence <= autoPickConfidence {
+		t.Errorf("confidence = %v, want > %v", res.Confidence, autoPickConfidence)
 	}
 }
 
@@ -1307,5 +1315,166 @@ func TestCapitalize(t *testing.T) {
 		if got := capitalize(tt.input); got != tt.want {
 			t.Errorf("capitalize(%q) = %q, want %q", tt.input, got, tt.want)
 		}
+	}
+}
+
+func TestParseScopedQuery(t *testing.T) {
+	cases := []struct {
+		in         string
+		repo       string
+		kinds      []string
+		symbolKind string
+		filePrefix string
+		term       string
+	}{
+		{"Currency", "", nil, "", "", "Currency"},
+		{"repo:golf kind:struct Currency", "golf", []string{"symbol"}, "struct", "", "Currency"},
+		{"kind:module internal/server", "", []string{"module"}, "", "", "internal/server"},
+		{"repo:golf/subtenant", "golf", nil, "", "", "subtenant"},
+		{"kind:symbol/Currency", "", []string{"symbol"}, "", "", "Currency"},
+		{"file:/domain//Currency", "", nil, "", "domain", "Currency"},
+		{"file:domain", "", nil, "", "domain", ""},
+		{"http://example.com", "", nil, "", "", "http://example.com"}, // not a scope keyword
+	}
+	for _, tc := range cases {
+		sq := parseScopedQuery(tc.in)
+		if sq.Repo != tc.repo {
+			t.Errorf("%q: Repo = %q, want %q", tc.in, sq.Repo, tc.repo)
+		}
+		if sq.SymbolKind != tc.symbolKind {
+			t.Errorf("%q: SymbolKind = %q, want %q", tc.in, sq.SymbolKind, tc.symbolKind)
+		}
+		if sq.FilePrefix != tc.filePrefix {
+			t.Errorf("%q: FilePrefix = %q, want %q", tc.in, sq.FilePrefix, tc.filePrefix)
+		}
+		if sq.Term != tc.term {
+			t.Errorf("%q: Term = %q, want %q", tc.in, sq.Term, tc.term)
+		}
+		if strings.Join(sq.Kinds, ",") != strings.Join(tc.kinds, ",") {
+			t.Errorf("%q: Kinds = %v, want %v", tc.in, sq.Kinds, tc.kinds)
+		}
+	}
+}
+
+func TestResolveNodeName_ScopedRepo(t *testing.T) {
+	store := facts.NewStore()
+	store.Add(
+		facts.Fact{Kind: facts.KindSymbol, Name: "domain.Currency", Repo: "golf",
+			File: "golf/domain/currency.go", Props: map[string]any{"symbol_kind": "struct"}},
+		facts.Fact{Kind: facts.KindSymbol, Name: "models.Currency", Repo: "golf-ui",
+			File: "golf-ui/models/currency.go", Props: map[string]any{"symbol_kind": "struct"}},
+	)
+	srv := newTestServer(store)
+
+	name, _, err := srv.resolveNodeName(store, "repo:golf Currency")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if name != "domain.Currency" {
+		t.Errorf("matched = %q, want domain.Currency", name)
+	}
+}
+
+func TestResolveNodeName_ScopedKindStruct(t *testing.T) {
+	store := facts.NewStore()
+	store.Add(
+		facts.Fact{Kind: facts.KindSymbol, Name: "models.Currency", File: "models/currency.go",
+			Props: map[string]any{"symbol_kind": "struct"}},
+		facts.Fact{Kind: facts.KindSymbol, Name: "models.Currency.Format", File: "models/currency.go",
+			Props: map[string]any{"symbol_kind": "method"}},
+		facts.Fact{Kind: facts.KindModule, Name: "internal/currency", Props: map[string]any{"language": "go"}},
+	)
+	srv := newTestServer(store)
+
+	name, _, err := srv.resolveNodeName(store, "kind:struct Currency")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if name != "models.Currency" {
+		t.Errorf("matched = %q, want models.Currency", name)
+	}
+}
+
+func TestResolveNodeName_ScopedFilePrefix(t *testing.T) {
+	store := facts.NewStore()
+	store.Add(
+		facts.Fact{Kind: facts.KindSymbol, Name: "a.Currency", File: "domain/currency.go",
+			Props: map[string]any{"symbol_kind": "struct"}},
+		facts.Fact{Kind: facts.KindSymbol, Name: "b.Currency", File: "api/currency.go",
+			Props: map[string]any{"symbol_kind": "struct"}},
+	)
+	srv := newTestServer(store)
+
+	name, _, err := srv.resolveNodeName(store, "file:domain Currency")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if name != "a.Currency" {
+		t.Errorf("matched = %q, want a.Currency", name)
+	}
+}
+
+func TestResolveNodeName_AutoPickAboveConfidence(t *testing.T) {
+	store := facts.NewStore()
+	store.Add(
+		// Suffix-exact match (tier 1) — its last segment IS the term.
+		facts.Fact{Kind: facts.KindSymbol, Name: "adapters.AuthHandler", File: "adapters/h.go",
+			Props: map[string]any{"symbol_kind": "struct"}},
+		// Substring-only peers (tier 0) — the term is buried in a longer name.
+		facts.Fact{Kind: facts.KindSymbol, Name: "adapters.AuthHandlerFactory", File: "adapters/f.go",
+			Props: map[string]any{"symbol_kind": "struct"}},
+		facts.Fact{Kind: facts.KindSymbol, Name: "middleware.NewAuthHandler", File: "mw/new.go",
+			Props: map[string]any{"symbol_kind": "function"}},
+	)
+	srv := newTestServer(store)
+
+	// Three matches (>= threshold) and no exact whole-name match, but exactly one
+	// has the term as its last segment — it dominates the substring-only peers, so
+	// it auto-picks instead of refusing.
+	name, res, err := srv.resolveNodeName(store, "AuthHandler")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if name != "adapters.AuthHandler" {
+		t.Errorf("matched = %q, want adapters.AuthHandler", name)
+	}
+	if res == nil {
+		t.Fatal("expected a non-nil resolution for an auto-picked match")
+	}
+	if !res.AutoPicked {
+		t.Error("resolution should be marked AutoPicked")
+	}
+	if res.Matched != "adapters.AuthHandler" {
+		t.Errorf("resolution.Matched = %q, want adapters.AuthHandler", res.Matched)
+	}
+	if res.Confidence <= autoPickConfidence {
+		t.Errorf("confidence = %v, want > %v", res.Confidence, autoPickConfidence)
+	}
+	if len(res.Candidates) == 0 {
+		t.Error("expected ranked candidates in the resolution")
+	}
+}
+
+func TestResolveNodeName_OverThresholdReturnsCandidates(t *testing.T) {
+	store := populateAmbiguousStore()
+	srv := newTestServer(store)
+
+	// Near-identical modules → no dominant candidate → refuse, but now with
+	// ranked candidates attached.
+	name, res, err := srv.resolveNodeName(store, "svc-beta")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if name != "" {
+		t.Errorf("expected empty match for ambiguous low-confidence input, got %q", name)
+	}
+	if res == nil || res.Matched != "" {
+		t.Fatalf("expected resolution with empty Matched, got %+v", res)
+	}
+	if len(res.Candidates) == 0 {
+		t.Error("expected ranked candidates to be surfaced")
+	}
+	if res.Confidence > autoPickConfidence {
+		t.Errorf("confidence = %v, should not exceed auto-pick threshold for near-ties", res.Confidence)
 	}
 }

@@ -1,6 +1,7 @@
 package facts
 
 import (
+	"sort"
 	"strings"
 	"sync"
 )
@@ -9,16 +10,16 @@ import (
 // It is a derived index rebuilt from the Store's facts after each snapshot generation.
 type Graph struct {
 	mu       sync.RWMutex
-	forward  map[string][]Edge    // fact name → outgoing edges
-	reverse  map[string][]Edge    // fact name → incoming edges
-	facts    []Fact               // reference to the store's facts (for metadata lookups)
-	factIdx  map[string]int       // fact name → first index in facts slice
-	edgeSeen map[string]struct{}  // deduplication: "source\x00kind\x00target"
+	forward  map[string][]Edge   // fact name → outgoing edges
+	reverse  map[string][]Edge   // fact name → incoming edges
+	facts    []Fact              // reference to the store's facts (for metadata lookups)
+	factIdx  map[string]int      // fact name → first index in facts slice
+	edgeSeen map[string]struct{} // deduplication: "source\x00kind\x00target"
 }
 
 // Edge represents a directed relationship between two facts.
 type Edge struct {
-	RelKind string // "imports", "calls", "declares", "implements", "depends_on"
+	RelKind string // "imports", "calls", "declares", "implements", "depends_on", "has_method"
 	Target  string // target fact name (forward) or source fact name (reverse)
 }
 
@@ -35,7 +36,14 @@ type TraversalNode struct {
 	Kind  string `json:"kind"`
 	File  string `json:"file,omitempty"`
 	Line  int    `json:"line,omitempty"`
+	Repo  string `json:"repo,omitempty"` // owning repo (multi-repo mode); makes cross-repo dependents legible
 	Depth int    `json:"depth"`
+	// Unresolved marks a node whose name is the target of an edge but has no
+	// backing fact in the store. This happens for inferred call targets that
+	// could not be matched to a declared symbol (e.g. interface-method dispatch,
+	// or calls into packages that weren't analyzed). The edge is real; the
+	// destination symbol just isn't in the graph.
+	Unresolved bool `json:"unresolved,omitempty"`
 }
 
 // TraversalEdge is an edge traversed during traversal.
@@ -55,12 +63,13 @@ type TraversalStats struct {
 
 // ImpactResult holds depth-bucketed impact analysis results.
 type ImpactResult struct {
-	Target   string                    `json:"target"`
-	ByDepth  map[int][]TraversalNode   `json:"by_depth"`
-	Edges    []TraversalEdge           `json:"edges"`
-	Summary  string                    `json:"summary"`
-	Stats    TraversalStats            `json:"stats"`
-	Forward  *TraversalResult          `json:"forward_dependencies,omitempty"`
+	Target          string                  `json:"target"`
+	ByDepth         map[int][]TraversalNode `json:"by_depth"`
+	Edges           []TraversalEdge         `json:"edges"`
+	Summary         string                  `json:"summary"`
+	Stats           TraversalStats          `json:"stats"`
+	Forward         *TraversalResult        `json:"forward_dependencies,omitempty"`
+	CrossRepoImpact []string                `json:"cross_repo_impact,omitempty"` // other repos with a dependent on the target
 }
 
 // PathResult holds a shortest-path result.
@@ -149,11 +158,54 @@ func NewGraph(ff []Fact) *Graph {
 		}
 	}
 
+	// Third pass: synthesize "has_method" edges linking an owner type symbol
+	// (struct/interface/class/type) to its method symbols. Extractors emit a
+	// method as a sibling fact named "<owner>.<method>" with no edge back to the
+	// owner, so forward traversal from a type would otherwise surface none of its
+	// methods (and transitively none of their calls). This is language-agnostic:
+	// any fact named "<knownType>.<member>" gets wired to its owner.
+	for _, f := range ff {
+		if f.Kind != KindSymbol {
+			continue
+		}
+		sk, _ := f.Props["symbol_kind"].(string)
+		if sk != SymbolMethod && sk != SymbolFunc {
+			continue
+		}
+		if owner := g.methodOwner(f.Name); owner != "" {
+			g.addEdge(owner, RelHasMethod, f.Name)
+		}
+	}
+
 	// edgeSeen is only needed during construction; release it so the GC can
 	// reclaim the O(edges × 3 strings) backing memory.
 	g.edgeSeen = nil
 
 	return g
+}
+
+// methodOwner returns the owner type name for a method fact name of the form
+// "<owner>.<method>", but only when <owner> is itself a known symbol fact whose
+// symbol_kind is a type (struct/interface/class/type). Returns "" otherwise.
+func (g *Graph) methodOwner(name string) string {
+	dot := strings.LastIndex(name, ".")
+	if dot <= 0 {
+		return ""
+	}
+	owner := name[:dot]
+	idx, ok := g.factIdx[owner]
+	if !ok || idx >= len(g.facts) {
+		return ""
+	}
+	of := g.facts[idx]
+	if of.Kind != KindSymbol {
+		return ""
+	}
+	switch sk, _ := of.Props["symbol_kind"].(string); sk {
+	case SymbolStruct, SymbolInterface, SymbolClass, SymbolType:
+		return owner
+	}
+	return ""
 }
 
 // Traverse performs a BFS traversal from the given start node.
@@ -163,6 +215,14 @@ func NewGraph(ff []Fact) *Graph {
 // maxDepth limits traversal depth (0 = use default 5).
 // maxNodes limits total returned nodes (0 = use default 100).
 func (g *Graph) Traverse(start, direction string, relKinds, nodeKinds []string, maxDepth, maxNodes int) TraversalResult {
+	return g.traverseFrom([]string{start}, direction, relKinds, nodeKinds, maxDepth, maxNodes)
+}
+
+// traverseFrom is the multi-source BFS underlying Traverse. Every name in starts
+// is seeded at depth 0 (deduplicated), so a logical entity spread across several
+// fact nodes — e.g. a type plus its methods and constructor — can be traversed as
+// one origin. Single-source callers pass a one-element slice.
+func (g *Graph) traverseFrom(starts []string, direction string, relKinds, nodeKinds []string, maxDepth, maxNodes int) TraversalResult {
 	g.mu.RLock()
 	defer g.mu.RUnlock()
 
@@ -195,10 +255,16 @@ func (g *Graph) Traverse(start, direction string, relKinds, nodeKinds []string, 
 		depth int
 	}
 
-	// Add start node
-	visited[start] = true
-	queue := []queueItem{{name: start, depth: 0}}
-	result.Nodes = append(result.Nodes, g.nodeFor(start, 0))
+	// Seed every start node at depth 0.
+	var queue []queueItem
+	for _, start := range starts {
+		if visited[start] {
+			continue
+		}
+		visited[start] = true
+		queue = append(queue, queueItem{name: start, depth: 0})
+		result.Nodes = append(result.Nodes, g.nodeFor(start, 0))
+	}
 
 	truncated := false
 	maxDepthReached := 0
@@ -302,7 +368,7 @@ func (g *Graph) FindPath(from, to string, relKinds []string, maxDepth int) PathR
 	relSet := toSet(relKinds)
 
 	type queueItem struct {
-		name string
+		name  string
 		depth int
 	}
 
@@ -394,8 +460,11 @@ func (g *Graph) ImpactSet(target string, maxDepth, maxNodes int, includeForward 
 		maxNodes = 500
 	}
 
-	// Reverse traversal: who depends on target?
-	rev := g.Traverse(target, "reverse", nil, nil, maxDepth, maxNodes)
+	// Reverse traversal: who depends on target? When the target is a type, seed
+	// from its methods (via has_method) and constructor too, so callers that
+	// reference the type through those — not the bare type node — are included.
+	seeds := g.impactSeeds(target)
+	rev := g.traverseFrom(seeds, "reverse", nil, nil, maxDepth, maxNodes)
 
 	result := ImpactResult{
 		Target:  target,
@@ -404,15 +473,32 @@ func (g *Graph) ImpactSet(target string, maxDepth, maxNodes int, includeForward 
 		Stats:   rev.Stats,
 	}
 
-	// Bucket nodes by depth (skip depth 0 which is the target itself)
+	// Bucket nodes by depth (skip depth 0, which holds the target entity's own
+	// seed nodes) and roll up which other repos contain a dependent.
+	targetRepo := g.repoOf(target)
+	repoSet := map[string]bool{}
 	for _, n := range rev.Nodes {
 		if n.Depth > 0 {
 			result.ByDepth[n.Depth] = append(result.ByDepth[n.Depth], n)
+			if n.Repo != "" && n.Repo != targetRepo {
+				repoSet[n.Repo] = true
+			}
 		}
+	}
+	if len(repoSet) > 0 {
+		repos := make([]string, 0, len(repoSet))
+		for r := range repoSet {
+			repos = append(repos, r)
+		}
+		sort.Strings(repos)
+		result.CrossRepoImpact = repos
 	}
 
 	// Build summary
 	result.Summary = g.buildImpactSummary(result.ByDepth)
+	if len(result.CrossRepoImpact) > 0 {
+		result.Summary += " — spans repos: " + strings.Join(result.CrossRepoImpact, ", ")
+	}
 
 	// Optionally include forward dependencies
 	if includeForward {
@@ -423,13 +509,63 @@ func (g *Graph) ImpactSet(target string, maxDepth, maxNodes int, includeForward 
 	return result
 }
 
+// repoOf returns the repo label of the fact named name, or "" if absent.
+func (g *Graph) repoOf(name string) string {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	if idx, ok := g.factIdx[name]; ok && idx < len(g.facts) {
+		return g.facts[idx].Repo
+	}
+	return ""
+}
+
+// impactSeeds returns the set of fact names that together represent the target
+// entity for impact analysis. For a type symbol (struct/class/interface/type)
+// this is the type plus its methods (via has_method edges) and its constructor
+// (the New<Type> function in the same package, when present), so reverse
+// traversal finds callers that reference the type through any of them. For any
+// other target it is just the target itself.
+func (g *Graph) impactSeeds(target string) []string {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+
+	seeds := []string{target}
+	idx, ok := g.factIdx[target]
+	if !ok || idx >= len(g.facts) {
+		return seeds
+	}
+	if g.facts[idx].Kind != KindSymbol {
+		return seeds
+	}
+	switch sk, _ := g.facts[idx].Props["symbol_kind"].(string); sk {
+	case SymbolStruct, SymbolClass, SymbolInterface, SymbolType:
+	default:
+		return seeds
+	}
+
+	// Methods: has_method edges point from the type to each of its methods.
+	for _, e := range g.forward[target] {
+		if e.RelKind == RelHasMethod {
+			seeds = append(seeds, e.Target)
+		}
+	}
+	// Constructor: "<pkg>.New<Type>" in the same package, when it exists.
+	if dot := strings.LastIndex(target, "."); dot >= 0 {
+		ctor := target[:dot+1] + "New" + target[dot+1:]
+		if _, ok := g.factIdx[ctor]; ok {
+			seeds = append(seeds, ctor)
+		}
+	}
+	return seeds
+}
+
 // normalizeExternalTarget strips a known Go module path prefix from a call
 // target that doesn't match any fact. This bridges cross-repo call edges where
 // the consumer emits the full import path (e.g. "github.com/x/go-auth/adapters.Handler.Login")
 // but the provider's facts use the repo-relative path (e.g. "adapters.Handler.Login").
 //
-//   subpackage: "github.com/x/go-auth/adapters.Handler.Login" → "adapters.Handler.Login"
-//   root pkg:   "github.com/x/go-auth.SecurityHeaders"        → "..SecurityHeaders"
+//	subpackage: "github.com/x/go-auth/adapters.Handler.Login" → "adapters.Handler.Login"
+//	root pkg:   "github.com/x/go-auth.SecurityHeaders"        → "..SecurityHeaders"
 func normalizeExternalTarget(target string, modulePaths map[string]struct{}) string {
 	for modulePath := range modulePaths {
 		if !strings.HasPrefix(target, modulePath) {
@@ -555,6 +691,12 @@ func (g *Graph) nodeFor(name string, depth int) TraversalNode {
 		node.Kind = f.Kind
 		node.File = f.File
 		node.Line = f.Line
+		node.Repo = f.Repo
+	} else {
+		// No backing fact: this is a dangling edge target (e.g. an inferred call
+		// into an unanalyzed package or an interface method). Mark it honestly
+		// rather than emitting a silent kind-less node.
+		node.Unresolved = true
 	}
 	return node
 }

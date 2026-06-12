@@ -36,6 +36,13 @@ const SyntheticMarker = "crossrepo"
 // maxSamples bounds how many endpoint / import samples an edge fact carries.
 const maxSamples = 25
 
+// minSharedSegments is the fewest trailing path segments a client and server
+// route must share for a suffix match. Two segments (e.g. "settings/feedback")
+// keeps the join specific enough to avoid false positives while tolerating the
+// base-path/prefix differences between a server's full path ("/api/settings/...")
+// and a client's base-relative call ("settings/...").
+const minSharedSegments = 2
+
 // edge accumulates everything justifying one consumer -> provider dependency.
 type edge struct {
 	consumer  string
@@ -66,7 +73,18 @@ func ComputeLinks(all []facts.Fact) []facts.Fact {
 	linkHTTP(all, edges)
 	linkImports(all, normToLabel, edges)
 
-	return materialize(edges)
+	return materialize(edges, repoLabels(normToLabel))
+}
+
+// repoLabels returns the actual repo labels (the values of the
+// normalized-label lookup), sorted for deterministic output.
+func repoLabels(normToLabel map[string]string) []string {
+	out := make([]string, 0, len(normToLabel))
+	for _, label := range normToLabel {
+		out = append(out, label)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // repoLabelLookup returns a map from normalized repo label to the actual label,
@@ -105,9 +123,15 @@ func linkHTTP(all []facts.Fact, edges map[string]*edge) {
 			continue
 		}
 		ref := routeRef{repo: f.Repo, method: method, path: f.Name}
+		// Index every trailing-segment suffix of each server path, so a client
+		// that calls a base-relative subpath ("settings/x") still matches a
+		// server serving the full path ("/api/settings/x"). serverPaths already
+		// returns normalized paths.
 		for _, p := range serverPaths(f) {
-			key := routeKey(p, method)
-			server[key] = append(server[key], ref)
+			for _, suf := range pathSuffixes(p) {
+				key := routeKey(suf, method)
+				server[key] = append(server[key], ref)
+			}
 		}
 	}
 
@@ -124,7 +148,9 @@ func linkHTTP(all []facts.Fact, edges map[string]*edge) {
 		if isGenericPath(np) {
 			continue
 		}
-		matches := server[routeKey(np, method)]
+		// Canonicalize the leading slash so a base-relative client path
+		// ("settings/x") matches the indexed suffix form ("/settings/x").
+		matches := server[routeKey(canonicalLeadingSlash(np), method)]
 		provider := pickProvider(f, matches)
 		if provider == "" || provider == f.Repo {
 			continue
@@ -259,11 +285,7 @@ func edgeFor(edges map[string]*edge, consumer, provider string) *edge {
 	return e
 }
 
-func materialize(edges map[string]*edge) []facts.Fact {
-	if len(edges) == 0 {
-		return nil
-	}
-
+func materialize(edges map[string]*edge, allRepos []string) []facts.Fact {
 	// Stable order over edges.
 	keys := make([]string, 0, len(edges))
 	for k := range edges {
@@ -308,6 +330,12 @@ func materialize(edges map[string]*edge) []facts.Fact {
 			Repo:  e.consumer,
 			Props: props,
 		})
+	}
+
+	// Every loaded repo becomes an addressable service node, even with no
+	// cross-repo edges, so find_path/traverse can resolve isolated repo labels.
+	for _, r := range allRepos {
+		repoSet[r] = true
 	}
 
 	// Service nodes first (sorted), then dependency edges. Each consumer's
@@ -385,6 +413,41 @@ func normalizePath(p string) string {
 		}
 	}
 	return strings.Join(segs, "/")
+}
+
+// pathSuffixes returns every trailing-segment suffix of a normalized path that
+// has at least minSharedSegments non-empty segments, longest first. Each suffix
+// is rendered leading-slash-canonical ("/seg/seg/..."), so a server path
+// "/api/settings/entitlements/definitions" yields:
+//
+//	/api/settings/entitlements/definitions
+//	/settings/entitlements/definitions
+//	/entitlements/definitions
+//
+// ("definitions" alone is dropped: below minSharedSegments). This lets a client
+// calling a base-relative subpath match the server serving the full path.
+func pathSuffixes(normPath string) []string {
+	var segs []string
+	for _, s := range strings.Split(normPath, "/") {
+		if s != "" {
+			segs = append(segs, s)
+		}
+	}
+	var out []string
+	for start := 0; start+minSharedSegments <= len(segs); start++ {
+		out = append(out, "/"+strings.Join(segs[start:], "/"))
+	}
+	return out
+}
+
+// canonicalLeadingSlash ensures a non-empty path starts with "/", so a
+// base-relative client path ("settings/x") compares equal to the indexed
+// suffix form ("/settings/x").
+func canonicalLeadingSlash(p string) string {
+	if p == "" || strings.HasPrefix(p, "/") {
+		return p
+	}
+	return "/" + p
 }
 
 // isGenericPath reports whether a path is too low-signal to safely link on

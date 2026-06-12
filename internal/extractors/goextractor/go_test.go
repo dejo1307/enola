@@ -656,3 +656,41 @@ func TestDetect(t *testing.T) {
 		t.Error("expected Detect=false for directory without go.mod")
 	}
 }
+
+// TestExtract_StructAndMethodAreSeparateFacts documents the contract the graph's
+// has_method synthesis relies on: a struct and each of its methods are emitted as
+// distinct sibling facts ("pkg.Type" and "pkg.Type.Method"), with no edge between
+// them at extraction time. If this ever changes, internal/facts.NewGraph's
+// has_method third pass must be revisited.
+func TestExtract_StructAndMethodAreSeparateFacts(t *testing.T) {
+	ff := extractAll(t, map[string]string{
+		"pkg/handler.go": `package pkg
+
+type AuthHandler struct{}
+
+func (h *AuthHandler) Login() {}
+`,
+	})
+
+	st, ok := findFact(ff, "pkg.AuthHandler")
+	if !ok {
+		t.Fatal("expected struct fact pkg.AuthHandler")
+	}
+	if st.Props["symbol_kind"] != facts.SymbolStruct {
+		t.Errorf("AuthHandler symbol_kind = %v, want struct", st.Props["symbol_kind"])
+	}
+	// The struct must NOT carry an edge to its method (the graph synthesizes it).
+	for _, rel := range st.Relations {
+		if rel.Target == "pkg.AuthHandler.Login" {
+			t.Errorf("struct should not declare its method directly, found relation %+v", rel)
+		}
+	}
+
+	m, ok := findFact(ff, "pkg.AuthHandler.Login")
+	if !ok {
+		t.Fatal("expected method fact pkg.AuthHandler.Login as a separate fact")
+	}
+	if m.Props["symbol_kind"] != facts.SymbolMethod {
+		t.Errorf("Login symbol_kind = %v, want method", m.Props["symbol_kind"])
+	}
+}

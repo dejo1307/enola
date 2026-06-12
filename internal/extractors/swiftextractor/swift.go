@@ -72,8 +72,8 @@ func (e *SwiftExtractor) Extract(ctx context.Context, repoPath string, files []s
 	isiOS := detectiOSProject(repoPath)
 
 	modules := make(map[string]bool)
-	typeIndex := make(map[string]string)    // simple type name -> module (directory)
-	dirToFile := make(map[string]string)    // module dir -> a representative source file
+	typeIndex := make(map[string]string) // simple type name -> module (directory)
+	dirToFile := make(map[string]string) // module dir -> a representative source file
 	var swiftFiles []string
 	var manifestFiles []string // Package.swift manifests, parsed after the walk
 
@@ -105,6 +105,7 @@ func (e *SwiftExtractor) Extract(ctx context.Context, repoPath string, files []s
 
 		fileFacts := extractFileAST(src, relFile, isiOS)
 		allFacts = append(allFacts, fileFacts...)
+		allFacts = append(allFacts, extractURLSessionFacts(src, relFile)...)
 
 		dir := filepath.Dir(relFile)
 		modules[dir] = true

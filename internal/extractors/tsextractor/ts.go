@@ -148,6 +148,9 @@ func (e *TSExtractor) extractFile(src []byte, relFile string, isNextJS bool, ali
 		result = append(result, openapiRoutes...)
 	}
 
+	// Hand-written fetch / makeRequest API calls are also client-role routes.
+	result = append(result, extractHTTPClientFacts(src, relFile)...)
+
 	lang := typescript.LanguageTypescript()
 	if strings.HasSuffix(relFile, ".tsx") {
 		lang = typescript.LanguageTSX()
