@@ -75,6 +75,7 @@ func (e *KotlinExtractor) Extract(ctx context.Context, repoPath string, files []
 		}
 
 		allFacts = append(allFacts, extractFileAST(src, relFile, isAndroid, sourceRoot, basePackage)...)
+		allFacts = append(allFacts, extractRetrofitFacts(src, relFile)...)
 		modules[filepath.Dir(relFile)] = true
 	}
 
