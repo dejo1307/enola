@@ -1,5 +1,3 @@
-> **Moved:** This project has moved from [dejo1307/enola](https://github.com/dejo1307/enola) to [enola-labs/enola](https://github.com/enola-labs/enola). All references, imports, and URLs have been updated. The old repository will redirect to the new location.
-
 # enola
 
 Give your AI agent a map of the codebase before it starts exploring.
@@ -41,12 +39,34 @@ The examples below show the enola output in action. Specific prompts were asking
 
 ## Quick Start
 
-### Prerequisites
+### Install (recommended)
+
+Grab a prebuilt binary for your platform with the install script — no Go toolchain or C compiler required:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/enola-labs/enola/main/install.sh | sh
+```
+
+This downloads the latest release, verifies its checksum, and installs `enola` to `~/.local/bin`. Set `ENOLA_INSTALL_DIR` to choose a different location:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/enola-labs/enola/main/install.sh | ENOLA_INSTALL_DIR=/usr/local/bin sh
+```
+
+Prebuilt binaries are published for Linux and macOS (amd64 and arm64) and Windows (amd64). If `~/.local/bin` is not on your `PATH`, add it:
+
+```bash
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+You can also download a specific release manually from the [Releases page](https://github.com/enola-labs/enola/releases).
+
+### Build from source
+
+Prerequisites:
 
 - Go 1.22+
 - C compiler (for tree-sitter CGo bindings)
-
-### Build
 
 ```bash
 go build -o enola ./cmd/enola
