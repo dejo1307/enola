@@ -16,6 +16,9 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
+// Version is set at build time via -ldflags.
+var Version = "dev"
+
 // Server wraps the MCP server and connects it to the snapshot engine.
 type Server struct {
 	mcp          *mcp.Server
@@ -34,7 +37,7 @@ func New(eng *engine.Engine, cfg *config.Config) (*Server, error) {
 
 	mcpServer := mcp.NewServer(&mcp.Implementation{
 		Name:    "enola",
-		Version: "0.1.0",
+		Version: Version,
 	}, nil)
 
 	s.mcp = mcpServer
