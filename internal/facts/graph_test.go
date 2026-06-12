@@ -1,6 +1,7 @@
 package facts
 
 import (
+	"reflect"
 	"testing"
 )
 
@@ -744,4 +745,99 @@ func TestTraverse_UnresolvedTargetMarked(t *testing.T) {
 	if !sawResolved {
 		t.Error("expected the resolved node jwt.Sign in the result")
 	}
+}
+
+// buildCrossRepoTypeStore models a go-auth library type (struct + method +
+// constructor) consumed by a golf caller, mirroring how the cross-repo call
+// normalisation lands golf's calls onto go-auth's local symbol names.
+func buildCrossRepoTypeStore() (*Graph, *Store) {
+	s := NewStore()
+	s.Add(
+		// go-auth: the AuthHandler type, one method, and its constructor.
+		Fact{Kind: KindSymbol, Name: "adapters.AuthHandler", File: "adapters/h.go", Line: 1, Repo: "go-auth",
+			Props: map[string]any{"symbol_kind": SymbolStruct}},
+		Fact{Kind: KindSymbol, Name: "adapters.AuthHandler.Login", File: "adapters/h.go", Line: 10, Repo: "go-auth",
+			Props: map[string]any{"symbol_kind": SymbolMethod}},
+		Fact{Kind: KindSymbol, Name: "adapters.NewAuthHandler", File: "adapters/h.go", Line: 30, Repo: "go-auth",
+			Props: map[string]any{"symbol_kind": SymbolFunc}},
+		// golf: a setup function that calls the constructor and a method.
+		Fact{Kind: KindSymbol, Name: "pkg/auth.Setup", File: "pkg/auth/setup.go", Line: 28, Repo: "golf",
+			Props: map[string]any{"symbol_kind": SymbolFunc}, Relations: []Relation{
+				{Kind: RelCalls, Target: "adapters.NewAuthHandler"},
+				{Kind: RelCalls, Target: "adapters.AuthHandler.Login"},
+			}},
+	)
+	s.BuildGraph()
+	return s.Graph(), s
+}
+
+func TestImpactSet_TypeRollup(t *testing.T) {
+	g, _ := buildCrossRepoTypeStore()
+
+	// Impact on the bare struct must roll up its method + constructor and surface
+	// the cross-repo caller (previously this returned "no dependents").
+	res := g.ImpactSet("adapters.AuthHandler", 3, 100, false)
+
+	names := nodeNames(impactNodes(res))
+	if !contains(names, "pkg/auth.Setup") {
+		t.Errorf("type rollup did not surface cross-repo caller pkg/auth.Setup; got %v", names)
+	}
+	// Seeds (the type entity itself) must not appear as dependents.
+	for _, seed := range []string{"adapters.AuthHandler", "adapters.AuthHandler.Login", "adapters.NewAuthHandler"} {
+		if contains(names, seed) {
+			t.Errorf("seed %q should be excluded from dependents", seed)
+		}
+	}
+	if !reflect.DeepEqual(res.CrossRepoImpact, []string{"golf"}) {
+		t.Errorf("CrossRepoImpact = %v, want [golf]", res.CrossRepoImpact)
+	}
+}
+
+func TestImpactSet_CrossRepoImpactField(t *testing.T) {
+	g, _ := buildCrossRepoTypeStore()
+
+	// A plain function target (not a type) still reports cross-repo dependents and
+	// per-node repo.
+	res := g.ImpactSet("adapters.NewAuthHandler", 2, 100, false)
+
+	if !reflect.DeepEqual(res.CrossRepoImpact, []string{"golf"}) {
+		t.Fatalf("CrossRepoImpact = %v, want [golf]", res.CrossRepoImpact)
+	}
+	var sawRepo bool
+	for _, nodes := range res.ByDepth {
+		for _, n := range nodes {
+			if n.Name == "pkg/auth.Setup" {
+				sawRepo = true
+				if n.Repo != "golf" {
+					t.Errorf("dependent node repo = %q, want golf", n.Repo)
+				}
+			}
+		}
+	}
+	if !sawRepo {
+		t.Error("expected pkg/auth.Setup among dependents")
+	}
+}
+
+func TestImpactSet_NonTypeUnchanged(t *testing.T) {
+	// Single-repo graph (no Repo tags): rollup is inert and CrossRepoImpact stays nil.
+	g, _ := buildTestGraph()
+	res := g.ImpactSet("D", 5, 100, false)
+
+	if res.CrossRepoImpact != nil {
+		t.Errorf("CrossRepoImpact should be nil for same-repo graph, got %v", res.CrossRepoImpact)
+	}
+	// D is called by C (a module here) — at least one dependent is found, as before.
+	if len(impactNodes(res)) == 0 {
+		t.Error("expected at least one dependent for D")
+	}
+}
+
+// impactNodes flattens an ImpactResult's depth buckets into a node slice.
+func impactNodes(res ImpactResult) []TraversalNode {
+	var out []TraversalNode
+	for _, nodes := range res.ByDepth {
+		out = append(out, nodes...)
+	}
+	return out
 }
