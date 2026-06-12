@@ -521,6 +521,11 @@ func collectFieldTypes(files []*ast.File, pkgDir, modulePath string, pkgNames ma
 //   - 3+ elements: resolve root to a qualified "pkg.Type", walk intermediate fields via fieldTypes, produce qualifiedType.method
 //
 // Falls back to the raw joined string when resolution is not possible, so no call is dropped.
+//
+// Known limitation: calls through an interface value (e.g. iface.Method()) cannot be
+// statically bound to a concrete implementation without type-flow analysis, so the
+// resolved target may name an interface method that has no backing symbol fact. Such
+// edges surface as "unresolved" nodes during traversal rather than concrete callees.
 func resolveChain(chain []string, ctx resolveCtx) string {
 	switch len(chain) {
 	case 0:
@@ -549,7 +554,7 @@ func resolveChain(chain []string, ctx resolveCtx) string {
 		// 3+ elements: attempt field-chain resolution.
 		root := chain[0]
 		var qualType string // "pkgDir.TypeName" or "importedPkg.TypeName"
-		var fieldStart int   // index of the first intermediate field in chain
+		var fieldStart int  // index of the first intermediate field in chain
 
 		if root == ctx.recvVar && ctx.recvType != "" {
 			qualType = ctx.pkgDir + "." + ctx.recvType

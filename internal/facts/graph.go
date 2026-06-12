@@ -9,16 +9,16 @@ import (
 // It is a derived index rebuilt from the Store's facts after each snapshot generation.
 type Graph struct {
 	mu       sync.RWMutex
-	forward  map[string][]Edge    // fact name → outgoing edges
-	reverse  map[string][]Edge    // fact name → incoming edges
-	facts    []Fact               // reference to the store's facts (for metadata lookups)
-	factIdx  map[string]int       // fact name → first index in facts slice
-	edgeSeen map[string]struct{}  // deduplication: "source\x00kind\x00target"
+	forward  map[string][]Edge   // fact name → outgoing edges
+	reverse  map[string][]Edge   // fact name → incoming edges
+	facts    []Fact              // reference to the store's facts (for metadata lookups)
+	factIdx  map[string]int      // fact name → first index in facts slice
+	edgeSeen map[string]struct{} // deduplication: "source\x00kind\x00target"
 }
 
 // Edge represents a directed relationship between two facts.
 type Edge struct {
-	RelKind string // "imports", "calls", "declares", "implements", "depends_on"
+	RelKind string // "imports", "calls", "declares", "implements", "depends_on", "has_method"
 	Target  string // target fact name (forward) or source fact name (reverse)
 }
 
@@ -36,6 +36,12 @@ type TraversalNode struct {
 	File  string `json:"file,omitempty"`
 	Line  int    `json:"line,omitempty"`
 	Depth int    `json:"depth"`
+	// Unresolved marks a node whose name is the target of an edge but has no
+	// backing fact in the store. This happens for inferred call targets that
+	// could not be matched to a declared symbol (e.g. interface-method dispatch,
+	// or calls into packages that weren't analyzed). The edge is real; the
+	// destination symbol just isn't in the graph.
+	Unresolved bool `json:"unresolved,omitempty"`
 }
 
 // TraversalEdge is an edge traversed during traversal.
@@ -55,12 +61,12 @@ type TraversalStats struct {
 
 // ImpactResult holds depth-bucketed impact analysis results.
 type ImpactResult struct {
-	Target   string                    `json:"target"`
-	ByDepth  map[int][]TraversalNode   `json:"by_depth"`
-	Edges    []TraversalEdge           `json:"edges"`
-	Summary  string                    `json:"summary"`
-	Stats    TraversalStats            `json:"stats"`
-	Forward  *TraversalResult          `json:"forward_dependencies,omitempty"`
+	Target  string                  `json:"target"`
+	ByDepth map[int][]TraversalNode `json:"by_depth"`
+	Edges   []TraversalEdge         `json:"edges"`
+	Summary string                  `json:"summary"`
+	Stats   TraversalStats          `json:"stats"`
+	Forward *TraversalResult        `json:"forward_dependencies,omitempty"`
 }
 
 // PathResult holds a shortest-path result.
@@ -149,11 +155,54 @@ func NewGraph(ff []Fact) *Graph {
 		}
 	}
 
+	// Third pass: synthesize "has_method" edges linking an owner type symbol
+	// (struct/interface/class/type) to its method symbols. Extractors emit a
+	// method as a sibling fact named "<owner>.<method>" with no edge back to the
+	// owner, so forward traversal from a type would otherwise surface none of its
+	// methods (and transitively none of their calls). This is language-agnostic:
+	// any fact named "<knownType>.<member>" gets wired to its owner.
+	for _, f := range ff {
+		if f.Kind != KindSymbol {
+			continue
+		}
+		sk, _ := f.Props["symbol_kind"].(string)
+		if sk != SymbolMethod && sk != SymbolFunc {
+			continue
+		}
+		if owner := g.methodOwner(f.Name); owner != "" {
+			g.addEdge(owner, RelHasMethod, f.Name)
+		}
+	}
+
 	// edgeSeen is only needed during construction; release it so the GC can
 	// reclaim the O(edges × 3 strings) backing memory.
 	g.edgeSeen = nil
 
 	return g
+}
+
+// methodOwner returns the owner type name for a method fact name of the form
+// "<owner>.<method>", but only when <owner> is itself a known symbol fact whose
+// symbol_kind is a type (struct/interface/class/type). Returns "" otherwise.
+func (g *Graph) methodOwner(name string) string {
+	dot := strings.LastIndex(name, ".")
+	if dot <= 0 {
+		return ""
+	}
+	owner := name[:dot]
+	idx, ok := g.factIdx[owner]
+	if !ok || idx >= len(g.facts) {
+		return ""
+	}
+	of := g.facts[idx]
+	if of.Kind != KindSymbol {
+		return ""
+	}
+	switch sk, _ := of.Props["symbol_kind"].(string); sk {
+	case SymbolStruct, SymbolInterface, SymbolClass, SymbolType:
+		return owner
+	}
+	return ""
 }
 
 // Traverse performs a BFS traversal from the given start node.
@@ -302,7 +351,7 @@ func (g *Graph) FindPath(from, to string, relKinds []string, maxDepth int) PathR
 	relSet := toSet(relKinds)
 
 	type queueItem struct {
-		name string
+		name  string
 		depth int
 	}
 
@@ -428,8 +477,8 @@ func (g *Graph) ImpactSet(target string, maxDepth, maxNodes int, includeForward 
 // the consumer emits the full import path (e.g. "github.com/x/go-auth/adapters.Handler.Login")
 // but the provider's facts use the repo-relative path (e.g. "adapters.Handler.Login").
 //
-//   subpackage: "github.com/x/go-auth/adapters.Handler.Login" → "adapters.Handler.Login"
-//   root pkg:   "github.com/x/go-auth.SecurityHeaders"        → "..SecurityHeaders"
+//	subpackage: "github.com/x/go-auth/adapters.Handler.Login" → "adapters.Handler.Login"
+//	root pkg:   "github.com/x/go-auth.SecurityHeaders"        → "..SecurityHeaders"
 func normalizeExternalTarget(target string, modulePaths map[string]struct{}) string {
 	for modulePath := range modulePaths {
 		if !strings.HasPrefix(target, modulePath) {
@@ -555,6 +604,11 @@ func (g *Graph) nodeFor(name string, depth int) TraversalNode {
 		node.Kind = f.Kind
 		node.File = f.File
 		node.Line = f.Line
+	} else {
+		// No backing fact: this is a dangling edge target (e.g. an inferred call
+		// into an unanalyzed package or an interface method). Mark it honestly
+		// rather than emitting a silent kind-less node.
+		node.Unresolved = true
 	}
 	return node
 }

@@ -651,7 +651,7 @@ func TestNormalizeExternalTarget(t *testing.T) {
 		{"github.com/dejo1307/go-auth/adapters.Handler.Login", "adapters.Handler.Login"},
 		{"github.com/dejo1307/go-auth.SecurityHeaders", "..SecurityHeaders"},
 		{"github.com/other/lib/pkg.Type.Method", ""}, // no matching module
-		{"github.com/dejo1307/go-auth", ""},           // no separator after module path
+		{"github.com/dejo1307/go-auth", ""},          // no separator after module path
 	}
 
 	for _, tc := range cases {
@@ -659,5 +659,89 @@ func TestNormalizeExternalTarget(t *testing.T) {
 		if got != tc.want {
 			t.Errorf("normalizeExternalTarget(%q) = %q, want %q", tc.target, got, tc.want)
 		}
+	}
+}
+
+// buildTypeMethodStore models a Go type with a method that makes a call, plus a
+// dangling call into an unanalyzed package. The struct and method are separate
+// sibling facts with no edge between them, mirroring the goextractor output.
+func buildTypeMethodStore() (*Graph, *Store) {
+	s := NewStore()
+	s.Add(
+		Fact{Kind: KindSymbol, Name: "auth.AuthHandler", File: "auth/handler.go", Line: 1,
+			Props: map[string]any{"symbol_kind": SymbolStruct}},
+		Fact{Kind: KindSymbol, Name: "auth.AuthHandler.Login", File: "auth/handler.go", Line: 10,
+			Props: map[string]any{"symbol_kind": SymbolMethod},
+			Relations: []Relation{
+				{Kind: RelCalls, Target: "jwt.Sign"},
+				{Kind: RelCalls, Target: "external.Unknown"}, // no backing fact
+			}},
+		Fact{Kind: KindSymbol, Name: "jwt.Sign", File: "jwt/jwt.go", Line: 5,
+			Props: map[string]any{"symbol_kind": SymbolFunc}},
+	)
+	s.BuildGraph()
+	return s.Graph(), s
+}
+
+func TestNewGraph_StructToMethodEdges(t *testing.T) {
+	g, _ := buildTypeMethodStore()
+
+	var found bool
+	for _, e := range g.Forward()["auth.AuthHandler"] {
+		if e.RelKind == RelHasMethod && e.Target == "auth.AuthHandler.Login" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("expected has_method edge auth.AuthHandler -> auth.AuthHandler.Login, got %+v", g.Forward()["auth.AuthHandler"])
+	}
+
+	// A package-level function whose owner ("jwt") is not a type must NOT get a
+	// has_method edge.
+	for _, e := range g.Forward()["jwt"] {
+		if e.RelKind == RelHasMethod {
+			t.Errorf("unexpected has_method edge from non-type owner: %+v", e)
+		}
+	}
+}
+
+func TestTraverse_ForwardFromStructSurfacesMethodCalls(t *testing.T) {
+	g, _ := buildTypeMethodStore()
+
+	result := g.Traverse("auth.AuthHandler", "forward", nil, nil, 5, 100)
+
+	names := nodeNames(result.Nodes)
+	for _, want := range []string{"auth.AuthHandler.Login", "jwt.Sign"} {
+		if !contains(names, want) {
+			t.Errorf("forward traverse from struct missing %q; got %v", want, names)
+		}
+	}
+}
+
+func TestTraverse_UnresolvedTargetMarked(t *testing.T) {
+	g, _ := buildTypeMethodStore()
+
+	result := g.Traverse("auth.AuthHandler.Login", "forward", nil, nil, 5, 100)
+
+	var sawUnresolved, sawResolved bool
+	for _, n := range result.Nodes {
+		switch n.Name {
+		case "external.Unknown":
+			sawUnresolved = true
+			if !n.Unresolved {
+				t.Error("external.Unknown should be marked Unresolved")
+			}
+		case "jwt.Sign":
+			sawResolved = true
+			if n.Unresolved {
+				t.Error("jwt.Sign is a real fact and must not be marked Unresolved")
+			}
+		}
+	}
+	if !sawUnresolved {
+		t.Error("expected an unresolved node external.Unknown in the result")
+	}
+	if !sawResolved {
+		t.Error("expected the resolved node jwt.Sign in the result")
 	}
 }

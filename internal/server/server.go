@@ -542,8 +542,10 @@ func (s *Server) registerTools() {
 		Name: "traverse",
 		Description: "Walk the dependency/call graph from a starting node. " +
 			"direction='forward' answers \"what does X depend on?\"; direction='reverse' answers \"what depends on X?\". " +
-			"start= accepts substring match; returns resolution info when ambiguous. " +
-			"relation_kinds filter: imports, calls, declares, implements, depends_on. " +
+			"start= accepts substring match plus scoped prefixes (repo:, kind:, file:) to disambiguate; returns ranked candidates with confidence when ambiguous. " +
+			"relation_kinds filter: imports, calls, declares, implements, depends_on, has_method. " +
+			"Forward traversal from a struct/interface follows has_method edges to its methods (and then their calls). " +
+			"Note: interface method calls cannot be statically bound to a concrete implementation, so such call edges may be absent or appear as unresolved nodes. " +
 			"node_kinds filters output (not traversal itself): module, symbol, dependency, route, storage. " +
 			"Defaults: depth=5, max_nodes=100. Use instead of repeated explore calls for transitive relationships.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, args traverseArgs) (*mcp.CallToolResult, any, error) {
@@ -597,8 +599,10 @@ func (s *Server) registerTools() {
 		Name: "find_path",
 		Description: "Find the shortest path (BFS, by hop count) between two nodes in the architectural graph. " +
 			"Answers \"how does X reach Y?\" or \"what is the call chain from A to B?\". " +
-			"from= and to= use substring match with smart disambiguation; when either name is ambiguous " +
-			"the response contains a resolution object listing candidates instead of a path. " +
+			"from= and to= use substring match with smart disambiguation, and accept scoped prefixes " +
+			"(repo:, kind:, file:) to pin down an ambiguous name, e.g. from=\"repo:go-auth Login\". " +
+			"When a name is ambiguous the response carries a resolution object with ranked candidates and a " +
+			"confidence score; one dominant candidate (>80% confidence) is auto-resolved so the path is still returned. " +
 			"Returns an ordered list of nodes and edges, or reports no path found within max_depth hops.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, args findPathArgs) (*mcp.CallToolResult, any, error) {
 		if s.toolCallback != nil {
@@ -701,126 +705,182 @@ const ambiguousMatchThreshold = 3
 // nameResolution so the response stays readable.
 const maxAlternatives = 10
 
+// maxCandidates caps how many ranked, scored candidates are surfaced in a
+// nameResolution.
+const maxCandidates = 3
+
+// autoPickConfidence is the pickConfidence threshold above which an ambiguous
+// resolution (at or above ambiguousMatchThreshold matches) is resolved
+// automatically to its top-scoring candidate instead of being refused.
+const autoPickConfidence = 0.80
+
 // nameResolution reports how a user-provided name was resolved to a concrete
 // fact name. It is surfaced in tool responses ONLY when the input matched more
 // than one fact (i.e. Ambiguous is true), so callers can detect and correct a
 // possibly-wrong pick. Matched is empty when the match count crossed
-// ambiguousMatchThreshold and the caller must re-invoke with an exact name.
+// ambiguousMatchThreshold and no candidate scored confidently enough to
+// auto-pick; the caller should then choose from Candidates (optionally using the
+// repo:/kind:/file: scope prefixes) or re-invoke with an exact name.
 type nameResolution struct {
-	Query        string   `json:"query"`
-	Matched      string   `json:"matched,omitempty"`
-	Alternatives []string `json:"alternatives,omitempty"`
-	Ambiguous    bool     `json:"ambiguous"`
+	Query        string            `json:"query"`
+	Matched      string            `json:"matched,omitempty"`
+	Alternatives []string          `json:"alternatives,omitempty"`
+	Candidates   []scoredCandidate `json:"candidates,omitempty"`
+	Confidence   float64           `json:"confidence,omitempty"`
+	AutoPicked   bool              `json:"auto_picked,omitempty"`
+	Ambiguous    bool              `json:"ambiguous"`
 }
 
 // resolveNodeName resolves a user-provided name to an exact fact name.
 //
-// It returns the resolved name and, when resolution was ambiguous (the input
-// substring-matched more than one fact and no confident pick existed), a
-// non-nil *nameResolution describing the ambiguity. For exact matches, single
-// substring matches, and confident suffix-exact matches the resolution is nil.
+// The input may carry scope prefixes — repo:<label>, kind:<k>, file:<prefix> —
+// to disambiguate an otherwise-ambiguous term (see parseScopedQuery). A plain
+// input keeps the legacy substring-match behavior.
 //
-// When the candidate count reaches ambiguousMatchThreshold the method refuses
-// to guess: it returns an empty name together with a resolution whose Matched
-// is empty, signalling the caller to emit a resolution-only response and
-// require an exact re-invocation.
+// It returns the resolved name and, when resolution was ambiguous (more than one
+// fact matched and no confident pick existed), a non-nil *nameResolution
+// describing the ambiguity (ranked Candidates with scores + a Confidence). For
+// exact matches, single matches, and confident suffix-exact matches the
+// resolution is nil.
+//
+// When the candidate count reaches ambiguousMatchThreshold the method picks the
+// top-scoring candidate only if its pickConfidence exceeds autoPickConfidence;
+// otherwise it returns an empty name with a resolution-only response so the
+// caller can choose from Candidates or re-invoke with a scoped/exact name.
 func (s *Server) resolveNodeName(store *facts.Store, input string) (string, *nameResolution, error) {
 	query := input
-	input = s.normalizeToRelative(input)
+	sq := parseScopedQuery(input)
+	scoped := sq.Repo != "" || len(sq.Kinds) > 0 || sq.FilePrefix != "" || sq.SymbolKind != ""
 
-	// Try exact match first
-	exact := store.LookupByExactName(input)
-	if len(exact) > 0 {
-		return exact[0].Name, nil, nil
+	term := s.normalizeToRelative(sq.Term)
+
+	// Try exact match first (unscoped only — a scope filter signals the caller
+	// wants the candidate set narrowed, not bypassed).
+	if !scoped {
+		if exact := store.LookupByExactName(term); len(exact) > 0 {
+			return exact[0].Name, nil, nil
+		}
 	}
 
-	// Try substring match
-	results := store.Query("", "", input, "")
+	results := s.gatherCandidates(store, sq, term)
 	if len(results) == 0 {
 		// Fallback 1: exact name match on KindService facts (service nodes are
 		// named after repo labels and are often missed by substring search).
 		for _, svc := range store.ByKind(facts.KindService) {
-			if strings.EqualFold(svc.Name, input) {
+			if strings.EqualFold(svc.Name, term) {
 				return svc.Name, nil, nil
 			}
 		}
 		// Fallback 2: input matches a known repo label whose service node may
 		// have an empty name (primary repo) or hasn't been loaded yet.
-		if name, ok := s.resolveRepoLabelToServiceNode(store, input); ok {
+		if name, ok := s.resolveRepoLabelToServiceNode(store, term); ok {
 			return name, nil, nil
 		}
-		return "", nil, fmt.Errorf("no facts matching %q", input)
+		return "", nil, fmt.Errorf("no facts matching %q", query)
 	}
 	if len(results) == 1 {
 		return results[0].Name, nil, nil
 	}
 
-	// Smart disambiguation: when multiple matches exist, try to find the
-	// most likely intended target rather than immediately erroring.
-
-	// 1. Prefer exact name suffix match (e.g., "AuthHandler" matching
-	//    "adapters.AuthHandler" over "adapters.AuthHandler.Login"). A unique
-	//    suffix-exact match is a confident pick, so no resolution is surfaced.
-	var suffixMatches []facts.Fact
-	for _, r := range results {
-		parts := strings.Split(r.Name, ".")
-		if len(parts) > 0 && parts[len(parts)-1] == input {
-			suffixMatches = append(suffixMatches, r)
+	// A service node whose name exactly matches the term is a confident pick.
+	for _, svc := range store.ByKind(facts.KindService) {
+		if strings.EqualFold(svc.Name, term) {
+			return svc.Name, nil, nil
 		}
 	}
-	if len(suffixMatches) == 1 {
-		return suffixMatches[0].Name, nil, nil
-	}
 
-	// Beyond this point the pick is a heuristic guess, so the result is
-	// ambiguous. If the candidate count crosses the threshold, refuse to guess
-	// and force an exact re-invocation — unless the input is the exact name of
-	// a service node, in which case we pick it confidently.
-	if len(results) >= ambiguousMatchThreshold {
-		for _, svc := range store.ByKind(facts.KindService) {
-			if strings.EqualFold(svc.Name, input) {
-				return svc.Name, nil, nil
-			}
-		}
-		return "", &nameResolution{
+	// Multiple matches: rank by relevance score and judge how decisively the top
+	// candidate wins.
+	ranked := rankCandidates(results, sq)
+	confidence := pickConfidence(ranked, sq.Term)
+	top := ranked[0].Name
+
+	// One candidate clearly dominates (e.g. a unique suffix-exact name among
+	// substring matches). Auto-resolve to it, but surface the resolution with its
+	// confidence and the alternatives so the caller can see — and override — the
+	// pick rather than it being silent.
+	if confidence > autoPickConfidence {
+		return top, &nameResolution{
 			Query:        query,
-			Alternatives: candidateNames(results, ""),
+			Matched:      top,
+			Alternatives: candidateNames(results, top),
+			Candidates:   topCandidates(ranked),
+			Confidence:   confidence,
+			AutoPicked:   true,
 			Ambiguous:    true,
 		}, nil
 	}
 
-	// Below threshold: pick the most likely candidate but flag the ambiguity.
-
-	// 2. Among suffix matches (or all results), prefer struct/class/interface
-	candidates := results
-	if len(suffixMatches) > 0 {
-		candidates = suffixMatches
-	}
-	matched := results[0].Name
-	for _, r := range candidates {
-		sk, _ := r.Props["symbol_kind"].(string)
-		if sk == "struct" || sk == "class" || sk == "interface" {
-			matched = r.Name
-			break
-		}
-	}
-	// 3. Prefer module-level facts over symbol-level (only if no struct/class/
-	//    interface was chosen above).
-	if matched == results[0].Name {
-		for _, r := range candidates {
-			if r.Kind == facts.KindModule {
-				matched = r.Name
-				break
-			}
-		}
+	// Below the ambiguity threshold, return the best guess (flagged ambiguous),
+	// preserving the long-standing "small ambiguity → pick anyway" behavior.
+	if len(results) < ambiguousMatchThreshold {
+		return top, &nameResolution{
+			Query:        query,
+			Matched:      top,
+			Alternatives: candidateNames(results, top),
+			Candidates:   topCandidates(ranked),
+			Confidence:   confidence,
+			Ambiguous:    true,
+		}, nil
 	}
 
-	return matched, &nameResolution{
+	// Too ambiguous to guess: surface ranked candidates and refuse to pick.
+	return "", &nameResolution{
 		Query:        query,
-		Matched:      matched,
-		Alternatives: candidateNames(results, matched),
+		Alternatives: candidateNames(results, ""),
+		Candidates:   topCandidates(ranked),
+		Confidence:   confidence,
 		Ambiguous:    true,
 	}, nil
+}
+
+// gatherCandidates returns the facts matching a (possibly scoped) query. Unscoped
+// inputs use the legacy substring Query to preserve existing semantics. Scoped
+// inputs use QueryAdvanced with repo/kind/file-prefix filters (expanding the file
+// prefix across repos in multi-repo mode) and an optional symbol_kind post-filter.
+func (s *Server) gatherCandidates(store *facts.Store, sq scopedQuery, term string) []facts.Fact {
+	scoped := sq.Repo != "" || len(sq.Kinds) > 0 || sq.FilePrefix != "" || sq.SymbolKind != ""
+	if !scoped {
+		return store.Query("", "", term, "")
+	}
+
+	prefixes := []string{""}
+	if sq.FilePrefix != "" {
+		prefixes = s.expandFilePrefix(sq.FilePrefix)
+	}
+
+	seen := make(map[string]struct{})
+	var out []facts.Fact
+	for _, pfx := range prefixes {
+		res, _ := store.QueryAdvanced(facts.QueryOpts{
+			Repo:       sq.Repo,
+			Kinds:      sq.Kinds,
+			FilePrefix: pfx,
+			Name:       term,
+			Limit:      500,
+		})
+		for _, f := range res {
+			if sq.SymbolKind != "" {
+				if sk, _ := f.Props["symbol_kind"].(string); sk != sq.SymbolKind {
+					continue
+				}
+			}
+			if _, dup := seen[f.Name]; dup {
+				continue
+			}
+			seen[f.Name] = struct{}{}
+			out = append(out, f)
+		}
+	}
+	return out
+}
+
+// topCandidates returns up to maxCandidates ranked candidates.
+func topCandidates(ranked []scoredCandidate) []scoredCandidate {
+	if len(ranked) > maxCandidates {
+		return ranked[:maxCandidates]
+	}
+	return ranked
 }
 
 // resolveRepoLabelToServiceNode maps a user-supplied label to the corresponding
@@ -881,9 +941,9 @@ type exploreArgs struct {
 
 // traverseArgs are the arguments for the traverse tool.
 type traverseArgs struct {
-	Start         string   `json:"start" jsonschema:"required,Starting node name (fact name, module name, or symbol name). Substring match."`
+	Start         string   `json:"start" jsonschema:"required,Starting node name (fact name, module name, or symbol name). Substring match; supports scoped prefixes repo:/kind:/file: to disambiguate (e.g. 'repo:go-auth kind:struct AuthHandler')."`
 	Direction     string   `json:"direction,omitempty" jsonschema:"'forward' follows outgoing relations (what does X depend on?), 'reverse' follows incoming relations (what depends on X?). Default: forward."`
-	RelationKinds []string `json:"relation_kinds,omitempty" jsonschema:"Filter to specific relation types: imports, calls, declares, implements, depends_on. Default: all."`
+	RelationKinds []string `json:"relation_kinds,omitempty" jsonschema:"Filter to specific relation types: imports, calls, declares, implements, depends_on, has_method. Default: all."`
 	MaxDepth      int      `json:"max_depth,omitempty" jsonschema:"Maximum traversal depth (1-20). Default: 5."`
 	MaxNodes      int      `json:"max_nodes,omitempty" jsonschema:"Maximum nodes to return (1-500). Traversal stops when this limit is reached. Default: 100."`
 	NodeKinds     []string `json:"node_kinds,omitempty" jsonschema:"Filter results to specific fact kinds: module, symbol, dependency, route, storage. Default: all."`
@@ -891,15 +951,15 @@ type traverseArgs struct {
 
 // findPathArgs are the arguments for the find_path tool.
 type findPathArgs struct {
-	From          string   `json:"from" jsonschema:"required,Source node name (substring match)."`
-	To            string   `json:"to" jsonschema:"required,Target node name (substring match)."`
+	From          string   `json:"from" jsonschema:"required,Source node name. Substring match; supports scoped prefixes repo:/kind:/file: to disambiguate (e.g. 'repo:go-auth Login')."`
+	To            string   `json:"to" jsonschema:"required,Target node name. Substring match; supports scoped prefixes repo:/kind:/file: to disambiguate (e.g. 'kind:struct AuthMiddleware')."`
 	RelationKinds []string `json:"relation_kinds,omitempty" jsonschema:"Filter to specific relation types. Default: all."`
 	MaxDepth      int      `json:"max_depth,omitempty" jsonschema:"Maximum path length to search (1-20). Default: 10."`
 }
 
 // impactAnalysisArgs are the arguments for the impact_analysis tool.
 type impactAnalysisArgs struct {
-	Target         string `json:"target" jsonschema:"required,The node being changed (fact name, substring match)."`
+	Target         string `json:"target" jsonschema:"required,The node being changed (fact name, substring match). Supports scoped prefixes repo:/kind:/file: to disambiguate."`
 	MaxDepth       int    `json:"max_depth,omitempty" jsonschema:"How many hops of impact to compute (1-10). Default: 3."`
 	MaxNodes       int    `json:"max_nodes,omitempty" jsonschema:"Maximum impacted nodes to return (1-500). Default: 200."`
 	IncludeForward bool   `json:"include_forward,omitempty" jsonschema:"Include what the target depends on (what might break the target). Default: false."`
