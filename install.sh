@@ -27,8 +27,9 @@ if [ -z "$VERSION" ]; then
   exit 1
 fi
 
-ASSET="enola-${VERSION}-${OS}-${ARCH}.tar.gz"
-SHASUM="${ASSET}.sha256"
+BASE="enola-${VERSION}-${OS}-${ARCH}"
+ASSET="${BASE}.tar.gz"
+SHASUM="${BASE}.sha256"
 URL="https://github.com/enola-labs/enola/releases/download/v${VERSION}/${ASSET}"
 SUM_URL="https://github.com/enola-labs/enola/releases/download/v${VERSION}/${SHASUM}"
 
@@ -41,13 +42,17 @@ curl -fsSL -o "$TMPDIR/$ASSET" "$URL"
 curl -fsSL -o "$TMPDIR/$SHASUM" "$SUM_URL"
 
 echo "==> Verifying checksum ..."
-(cd "$TMPDIR" && sha256sum -c "$SHASUM")
+if command -v sha256sum >/dev/null 2>&1; then
+  (cd "$TMPDIR" && sha256sum -c "$SHASUM")
+else
+  (cd "$TMPDIR" && shasum -a 256 -c "$SHASUM")
+fi
 
 echo "==> Extracting ..."
 tar xzf "$TMPDIR/$ASSET" -C "$TMPDIR"
 
 # --- Install ---
-BIN_NAME="enola-${VERSION}-${OS}-${ARCH}"
+BIN_NAME="${BASE}"
 if [ "$OS" = "windows" ]; then
   BIN_NAME="${BIN_NAME}.exe"
 fi
