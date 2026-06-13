@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -550,6 +551,7 @@ func (s *Server) registerTools() {
 			"Forward traversal from a struct/interface follows has_method edges to its methods (and then their calls). " +
 			"Note: interface method calls cannot be statically bound to a concrete implementation, so such call edges may be absent or appear as unresolved nodes. " +
 			"node_kinds filters output (not traversal itself): module, symbol, dependency, route, storage. " +
+			"Returns a compact markdown summary grouped by depth (output_mode='full' for the raw JSON node/edge graph). " +
 			"Defaults: depth=5, max_nodes=100. Use instead of repeated explore calls for transitive relationships.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, args traverseArgs) (*mcp.CallToolResult, any, error) {
 		if s.toolCallback != nil {
@@ -575,13 +577,17 @@ func (s *Server) registerTools() {
 		}
 		// Over threshold: refuse to guess; return resolution with empty results.
 		if res != nil && res.Matched == "" {
-			return jsonResult(traverseResponse{
+			resp := traverseResponse{
 				Resolution: res,
 				TraversalResult: facts.TraversalResult{
 					Nodes: []facts.TraversalNode{},
 					Edges: []facts.TraversalEdge{},
 				},
-			})
+			}
+			if wantsFullOutput(args.OutputMode) {
+				return jsonResult(resp)
+			}
+			return textResult(renderTraverseCompact(resp, args.Start, "")), nil, nil
 		}
 
 		direction := args.Direction
@@ -594,7 +600,11 @@ func (s *Server) registerTools() {
 
 		result := graph.Traverse(startName, direction, args.RelationKinds, args.NodeKinds, args.MaxDepth, args.MaxNodes)
 
-		return jsonResult(traverseResponse{Resolution: res, TraversalResult: result})
+		resp := traverseResponse{Resolution: res, TraversalResult: result}
+		if wantsFullOutput(args.OutputMode) {
+			return jsonResult(resp)
+		}
+		return textResult(renderTraverseCompact(resp, startName, direction)), nil, nil
 	})
 
 	// Tool: find_path
@@ -659,6 +669,7 @@ func (s *Server) registerTools() {
 			"target= uses substring match with smart disambiguation. " +
 			"Default: reverse direction only (what breaks if target changes). " +
 			"Set include_forward=true to also see what the target itself depends on (useful for understanding what could break the target). " +
+			"Returns a compact markdown summary grouped by hop depth, with an accurate total dependent count (output_mode='full' for the raw JSON). " +
 			"Defaults: max_depth=3, max_nodes=200.",
 	}, func(ctx context.Context, req *mcp.CallToolRequest, args impactAnalysisArgs) (*mcp.CallToolResult, any, error) {
 		if s.toolCallback != nil {
@@ -683,19 +694,27 @@ func (s *Server) registerTools() {
 		}
 		// Over threshold: refuse to guess; return resolution with empty results.
 		if res != nil && res.Matched == "" {
-			return jsonResult(impactResponse{
+			resp := impactResponse{
 				Resolution: res,
 				ImpactResult: facts.ImpactResult{
 					Target:  args.Target,
 					ByDepth: map[int][]facts.TraversalNode{},
 					Edges:   []facts.TraversalEdge{},
 				},
-			})
+			}
+			if wantsFullOutput(args.OutputMode) {
+				return jsonResult(resp)
+			}
+			return textResult(renderImpactCompact(resp)), nil, nil
 		}
 
 		result := graph.ImpactSet(targetName, args.MaxDepth, args.MaxNodes, args.IncludeForward)
 
-		return jsonResult(impactResponse{Resolution: res, ImpactResult: result})
+		resp := impactResponse{Resolution: res, ImpactResult: result}
+		if wantsFullOutput(args.OutputMode) {
+			return jsonResult(resp)
+		}
+		return textResult(renderImpactCompact(resp)), nil, nil
 	})
 }
 
@@ -950,6 +969,7 @@ type traverseArgs struct {
 	MaxDepth      int      `json:"max_depth,omitempty" jsonschema:"Maximum traversal depth (1-20). Default: 5."`
 	MaxNodes      int      `json:"max_nodes,omitempty" jsonschema:"Maximum nodes to return (1-500). Traversal stops when this limit is reached. Default: 100."`
 	NodeKinds     []string `json:"node_kinds,omitempty" jsonschema:"Filter results to specific fact kinds: module, symbol, dependency, route, storage. Default: all."`
+	OutputMode    string   `json:"output_mode,omitempty" jsonschema:"'compact' (default) returns a readable markdown summary grouped by depth; 'full' returns the complete JSON node/edge graph (can be large)."`
 }
 
 // findPathArgs are the arguments for the find_path tool.
@@ -966,6 +986,7 @@ type impactAnalysisArgs struct {
 	MaxDepth       int    `json:"max_depth,omitempty" jsonschema:"How many hops of impact to compute (1-10). Default: 3."`
 	MaxNodes       int    `json:"max_nodes,omitempty" jsonschema:"Maximum impacted nodes to return (1-500). Default: 200."`
 	IncludeForward bool   `json:"include_forward,omitempty" jsonschema:"Include what the target depends on (what might break the target). Default: false."`
+	OutputMode     string `json:"output_mode,omitempty" jsonschema:"'compact' (default) returns a readable markdown summary grouped by depth; 'full' returns the complete JSON by_depth/edges graph (can be large)."`
 }
 
 // exploreModule renders a module exploration if the focus matches a module name.
@@ -1073,6 +1094,12 @@ func (s *Server) exploreModule(store *facts.Store, focus string, depth int, sb *
 		sb.WriteString("\n")
 	}
 
+	// Nested subtree: modules and symbols beneath this directory. TypeScript/JS
+	// (and any per-directory module language) nests modules per directory, so a
+	// directory that is itself a module often has a large subtree of child
+	// modules whose symbols would otherwise be hidden by this exact-module match.
+	s.writeNestedModules(store, mod.Name, len(declaredSymbols), sb)
+
 	// If depth=2, show key symbol relations
 	if depth >= 2 && len(declaredSymbols) > 0 {
 		sb.WriteString("## Symbol Relations\n\n")
@@ -1096,6 +1123,69 @@ func (s *Server) exploreModule(store *facts.Store, focus string, depth int, sb *
 	}
 
 	return true
+}
+
+// writeNestedModules appends a summary of the modules and symbols nested beneath
+// modName (i.e. facts whose file path is under "<modName>/"). It lets a directory
+// that is itself a module surface its descendant modules and an aggregate symbol
+// count, instead of stopping at the module's own directly-declared symbols.
+func (s *Server) writeNestedModules(store *facts.Store, modName string, directSymbols int, sb *strings.Builder) {
+	prefix := modName + "/"
+
+	// Accurate totals (QueryAdvanced returns the pre-limit total). Symbols declared
+	// directly in this module also live under "<modName>/" (e.g. src/app/layout.tsx),
+	// so subtract them to count only symbols in nested child modules.
+	_, symTotal := store.QueryAdvanced(facts.QueryOpts{Kind: facts.KindSymbol, FilePrefix: prefix, Limit: 1})
+	nestedSymbols := symTotal - directSymbols
+	if nestedSymbols < 0 {
+		nestedSymbols = 0
+	}
+	modFacts, modTotal := store.QueryAdvanced(facts.QueryOpts{Kind: facts.KindModule, FilePrefix: prefix, Limit: 500})
+	if modTotal == 0 && nestedSymbols == 0 {
+		return
+	}
+
+	// Group descendant modules by their immediate child segment under modName,
+	// counting how many modules live under each child.
+	childCounts := make(map[string]int)
+	for _, m := range modFacts {
+		rest := strings.TrimPrefix(m.Name, prefix)
+		seg := rest
+		if i := strings.IndexByte(rest, '/'); i >= 0 {
+			seg = rest[:i]
+		}
+		if seg == "" {
+			continue
+		}
+		childCounts[seg]++
+	}
+
+	children := make([]string, 0, len(childCounts))
+	for seg := range childCounts {
+		children = append(children, seg)
+	}
+	sort.Strings(children)
+
+	sb.WriteString(fmt.Sprintf("## Nested modules (%d)\n\n", len(children)))
+	sb.WriteString(fmt.Sprintf("Subtree: %d modules, %d symbols\n\n", modTotal, nestedSymbols))
+
+	const maxChildren = 50
+	shown := children
+	if len(shown) > maxChildren {
+		shown = shown[:maxChildren]
+	}
+	for _, seg := range shown {
+		full := prefix + seg
+		if n := childCounts[seg]; n > 1 {
+			sb.WriteString(fmt.Sprintf("- %s (%d modules)\n", full, n))
+		} else {
+			sb.WriteString(fmt.Sprintf("- %s\n", full))
+		}
+	}
+	if len(children) > maxChildren {
+		sb.WriteString(fmt.Sprintf("\n... and %d more nested modules\n", len(children)-maxChildren))
+	}
+	sb.WriteString("\nUse explore on a nested module above to drill in.\n\n")
 }
 
 // exploreModuleSubstring tries substring matching on module names when exact
@@ -1519,6 +1609,191 @@ func jsonResult(v any) (*mcp.CallToolResult, any, error) {
 			&mcp.TextContent{Text: string(data)},
 		},
 	}, nil, nil
+}
+
+// textResult returns markdown/plain text as a (non-error) tool result.
+func textResult(s string) *mcp.CallToolResult {
+	return &mcp.CallToolResult{
+		Content: []mcp.Content{&mcp.TextContent{Text: s}},
+	}
+}
+
+// wantsFullOutput reports whether the caller asked for the raw JSON graph rather
+// than the default compact markdown summary.
+func wantsFullOutput(mode string) bool {
+	return strings.EqualFold(mode, "full")
+}
+
+// compactPerDepthCap bounds how many nodes are listed per depth bucket in the
+// compact graph-tool output, keeping responses well under the MCP token budget
+// even for high-fan-in nodes. The accurate totals still reflect the full set.
+const compactPerDepthCap = 40
+
+// writeResolutionNote renders the name-resolution context (if any) for the
+// compact graph-tool output: when a name was ambiguous and refused, it lists the
+// candidates so the caller can re-run with an exact name; when it was auto-picked
+// it notes the match and alternatives.
+func writeResolutionNote(sb *strings.Builder, res *nameResolution) {
+	if res == nil {
+		return
+	}
+	if res.Matched == "" {
+		fmt.Fprintf(sb, "> ⚠ Ambiguous %q — refine with an exact name or a repo:/kind:/file: scope. Candidates:\n", res.Query)
+		writeCandidateList(sb, res)
+		sb.WriteString("\n")
+		return
+	}
+	fmt.Fprintf(sb, "> Resolved %q → %s", res.Query, res.Matched)
+	if res.Confidence > 0 {
+		fmt.Fprintf(sb, " (confidence %.2f)", res.Confidence)
+	}
+	sb.WriteString("\n")
+	if len(res.Alternatives) > 0 {
+		fmt.Fprintf(sb, "> alternatives: %s\n", strings.Join(res.Alternatives, ", "))
+	}
+	sb.WriteString("\n")
+}
+
+// writeCandidateList prints a resolution's ranked candidates (falling back to the
+// plain alternative names when no scored candidates are present).
+func writeCandidateList(sb *strings.Builder, res *nameResolution) {
+	if len(res.Candidates) > 0 {
+		for _, c := range res.Candidates {
+			line := "> - " + c.Name
+			if c.Kind != "" {
+				line += " (" + c.Kind + ")"
+			}
+			if c.File != "" {
+				line += " — " + c.File
+			}
+			sb.WriteString(line + "\n")
+		}
+		return
+	}
+	for _, a := range res.Alternatives {
+		sb.WriteString("> - " + a + "\n")
+	}
+}
+
+// compactNodeLine formats a single traversal node as a markdown list item.
+func compactNodeLine(n facts.TraversalNode) string {
+	s := "- " + n.Name
+	if n.Kind != "" {
+		s += " (" + n.Kind + ")"
+	}
+	if n.Unresolved {
+		s += " [unresolved]"
+	}
+	if n.File != "" {
+		s += " — " + n.File
+		if n.Line > 0 {
+			s += fmt.Sprintf(":%d", n.Line)
+		}
+	}
+	return s
+}
+
+// writeNodesByDepth groups nodes by their depth (skipping depth 0, the origin)
+// and writes one capped section per depth.
+func writeNodesByDepth(sb *strings.Builder, nodes []facts.TraversalNode) {
+	byDepth := map[int][]facts.TraversalNode{}
+	for _, n := range nodes {
+		if n.Depth > 0 {
+			byDepth[n.Depth] = append(byDepth[n.Depth], n)
+		}
+	}
+	depths := make([]int, 0, len(byDepth))
+	for d := range byDepth {
+		depths = append(depths, d)
+	}
+	sort.Ints(depths)
+	for _, d := range depths {
+		group := byDepth[d]
+		fmt.Fprintf(sb, "## Depth %d (%d)\n\n", d, len(group))
+		shown := group
+		if len(shown) > compactPerDepthCap {
+			shown = shown[:compactPerDepthCap]
+		}
+		for _, n := range shown {
+			sb.WriteString(compactNodeLine(n) + "\n")
+		}
+		if len(group) > compactPerDepthCap {
+			fmt.Fprintf(sb, "... and %d more at depth %d\n", len(group)-compactPerDepthCap, d)
+		}
+		sb.WriteString("\n")
+	}
+}
+
+// renderImpactCompact renders an impact analysis as a compact markdown summary.
+func renderImpactCompact(resp impactResponse) string {
+	var sb strings.Builder
+	r := resp.ImpactResult
+	fmt.Fprintf(&sb, "# Impact: %s\n\n", r.Target)
+	writeResolutionNote(&sb, resp.Resolution)
+
+	// Ambiguous-and-refused: no traversal was run; the candidate list above is
+	// the actionable content.
+	if resp.Resolution != nil && resp.Resolution.Matched == "" {
+		return sb.String()
+	}
+
+	if r.Summary != "" {
+		sb.WriteString(r.Summary + "\n\n")
+	} else {
+		sb.WriteString("No dependents found.\n\n")
+	}
+
+	// Flatten ByDepth into a node slice for grouped rendering.
+	var nodes []facts.TraversalNode
+	for _, group := range r.ByDepth {
+		nodes = append(nodes, group...)
+	}
+	writeNodesByDepth(&sb, nodes)
+
+	if r.Forward != nil && len(r.Forward.Nodes) > 0 {
+		fmt.Fprintf(&sb, "# Forward dependencies of %s (what it depends on)\n\n", r.Target)
+		writeNodesByDepth(&sb, r.Forward.Nodes)
+	}
+
+	fmt.Fprintf(&sb, "_Stats: %d visited, max depth %d", r.Stats.NodesVisited, r.Stats.MaxDepthReached)
+	if r.Stats.Truncated {
+		sb.WriteString(", truncated — use max_nodes to widen or output_mode=full for the raw graph")
+	}
+	sb.WriteString("._\n")
+	return sb.String()
+}
+
+// renderTraverseCompact renders a graph traversal as a compact markdown summary.
+func renderTraverseCompact(resp traverseResponse, start, direction string) string {
+	var sb strings.Builder
+	if direction == "" {
+		direction = "forward"
+	}
+	fmt.Fprintf(&sb, "# Traverse: %s (%s)\n\n", start, direction)
+	writeResolutionNote(&sb, resp.Resolution)
+
+	if resp.Resolution != nil && resp.Resolution.Matched == "" {
+		return sb.String()
+	}
+
+	// Node count excludes depth-0 origin(s).
+	reached := 0
+	for _, n := range resp.Nodes {
+		if n.Depth > 0 {
+			reached++
+		}
+	}
+	fmt.Fprintf(&sb, "Reached **%d** nodes", reached)
+	if resp.Stats.Truncated {
+		sb.WriteString(" (truncated — more exist beyond the cap)")
+	}
+	sb.WriteString("\n\n")
+
+	writeNodesByDepth(&sb, resp.Nodes)
+
+	fmt.Fprintf(&sb, "_Edges: %d (use output_mode=full for the raw node/edge graph). Stats: %d visited, max depth %d._\n",
+		len(resp.Edges), resp.Stats.NodesVisited, resp.Stats.MaxDepthReached)
+	return sb.String()
 }
 
 // traverseResponse wraps a graph traversal with the optional name resolution.

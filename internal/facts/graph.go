@@ -66,6 +66,7 @@ type ImpactResult struct {
 	Target          string                  `json:"target"`
 	ByDepth         map[int][]TraversalNode `json:"by_depth"`
 	Edges           []TraversalEdge         `json:"edges"`
+	TotalDependents int                     `json:"total_dependents"` // true count of transitive dependents within max_depth, independent of the max_nodes display cap
 	Summary         string                  `json:"summary"`
 	Stats           TraversalStats          `json:"stats"`
 	Forward         *TraversalResult        `json:"forward_dependencies,omitempty"`
@@ -338,6 +339,25 @@ func (g *Graph) traverseFrom(starts []string, direction string, relKinds, nodeKi
 	result.Stats.MaxDepthReached = maxDepthReached
 	result.Stats.Truncated = truncated
 
+	// Edges are recorded for every relation walked, but the max_nodes cap and the
+	// node-kind filter can exclude some destinations from result.Nodes. Drop edges
+	// that reference an excluded node so the returned graph is self-consistent
+	// (every edge endpoint appears in Nodes). Only needed when something was
+	// excluded; otherwise every visited node is already in Nodes.
+	if truncated || kindSet != nil {
+		inSet := make(map[string]bool, len(result.Nodes))
+		for _, n := range result.Nodes {
+			inSet[n.Name] = true
+		}
+		kept := result.Edges[:0]
+		for _, e := range result.Edges {
+			if inSet[e.Source] && inSet[e.Target] {
+				kept = append(kept, e)
+			}
+		}
+		result.Edges = kept
+	}
+
 	return result
 }
 
@@ -466,11 +486,18 @@ func (g *Graph) ImpactSet(target string, maxDepth, maxNodes int, includeForward 
 	seeds := g.impactSeeds(target)
 	rev := g.traverseFrom(seeds, "reverse", nil, nil, maxDepth, maxNodes)
 
+	// The max_nodes cap stops the BFS frontier, so rev's node/visited counts do
+	// not reflect the true dependent count. Compute it with a cheap count-only
+	// pass (same seeds, same depth, no node cap) so the summary is accurate even
+	// when the displayed set is truncated.
+	totalDependents := g.reachableCount(seeds, "reverse", maxDepth)
+
 	result := ImpactResult{
-		Target:  target,
-		ByDepth: make(map[int][]TraversalNode),
-		Edges:   rev.Edges,
-		Stats:   rev.Stats,
+		Target:          target,
+		ByDepth:         make(map[int][]TraversalNode),
+		Edges:           rev.Edges,
+		TotalDependents: totalDependents,
+		Stats:           rev.Stats,
 	}
 
 	// Bucket nodes by depth (skip depth 0, which holds the target entity's own
@@ -495,7 +522,7 @@ func (g *Graph) ImpactSet(target string, maxDepth, maxNodes int, includeForward 
 	}
 
 	// Build summary
-	result.Summary = g.buildImpactSummary(result.ByDepth)
+	result.Summary = g.buildImpactSummary(result.ByDepth, totalDependents)
 	if len(result.CrossRepoImpact) > 0 {
 		result.Summary += " — spans repos: " + strings.Join(result.CrossRepoImpact, ", ")
 	}
@@ -701,14 +728,18 @@ func (g *Graph) nodeFor(name string, depth int) TraversalNode {
 	return node
 }
 
-func (g *Graph) buildImpactSummary(byDepth map[int][]TraversalNode) string {
-	if len(byDepth) == 0 {
+// buildImpactSummary renders the per-depth breakdown of the displayed dependents.
+// total is the true dependent count within max_depth; when it exceeds the shown
+// count (because the max_nodes cap truncated the display), the summary notes how
+// many are shown.
+func (g *Graph) buildImpactSummary(byDepth map[int][]TraversalNode, total int) string {
+	if total == 0 {
 		return "No dependents found."
 	}
 
-	total := 0
+	shown := 0
 	for _, nodes := range byDepth {
-		total += len(nodes)
+		shown += len(nodes)
 	}
 
 	summary := ""
@@ -743,7 +774,59 @@ func (g *Graph) buildImpactSummary(byDepth map[int][]TraversalNode) string {
 		}
 	}
 
-	return itoa(total) + " total dependents — " + summary
+	prefix := itoa(total) + " total dependents"
+	if shown < total {
+		prefix += " (showing " + itoa(shown) + ")"
+	}
+	return prefix + " — " + summary
+}
+
+// reachableCount counts the distinct nodes reachable from seeds within maxDepth
+// (following all relation kinds), excluding the seeds themselves. Unlike
+// traverseFrom it materializes nothing and applies no node cap, so it yields the
+// true dependent/dependency count even when the displayed set is truncated. It
+// terminates because the graph is finite and the BFS is depth-bounded.
+func (g *Graph) reachableCount(seeds []string, direction string, maxDepth int) int {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+
+	if maxDepth <= 0 {
+		maxDepth = 3
+	}
+	adj := g.forward
+	if direction == "reverse" {
+		adj = g.reverse
+	}
+
+	visited := make(map[string]bool)
+	type queueItem struct {
+		name  string
+		depth int
+	}
+	var queue []queueItem
+	for _, s := range seeds {
+		if !visited[s] {
+			visited[s] = true
+			queue = append(queue, queueItem{name: s, depth: 0})
+		}
+	}
+	seedCount := len(visited)
+
+	for qi := 0; qi < len(queue); qi++ {
+		item := queue[qi]
+		if item.depth >= maxDepth {
+			continue
+		}
+		for _, e := range adj[item.name] {
+			if visited[e.Target] {
+				continue
+			}
+			visited[e.Target] = true
+			queue = append(queue, queueItem{name: e.Target, depth: item.depth + 1})
+		}
+	}
+
+	return len(visited) - seedCount
 }
 
 func toSet(ss []string) map[string]struct{} {

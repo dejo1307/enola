@@ -461,6 +461,189 @@ func TestExtract_CallExtraction_MethodOnReceiver_NoEdge(t *testing.T) {
 	}
 }
 
+// --- React / Next.js semantic classification & coverage tests ---
+
+func TestExtract_DefaultExportFunctionComponent(t *testing.T) {
+	ff := extractAll(t, map[string]string{
+		"src/components/Button.tsx": `export default function Button() { return <button/> }`,
+	}, true)
+
+	f, ok := findFact(ff, "src/components.Button")
+	if !ok {
+		t.Fatal("expected fact for src/components.Button")
+	}
+	if f.Props["symbol_kind"] != facts.SymbolFunc {
+		t.Errorf("symbol_kind = %v, want function", f.Props["symbol_kind"])
+	}
+	if f.Props["exported"] != true {
+		t.Errorf("exported = %v, want true", f.Props["exported"])
+	}
+	if f.Props["web_component"] != "component" {
+		t.Errorf("web_component = %v, want component", f.Props["web_component"])
+	}
+	if f.Props["framework"] != "nextjs" {
+		t.Errorf("framework = %v, want nextjs", f.Props["framework"])
+	}
+}
+
+func TestExtract_AnonymousDefaultExport_NamedByFile(t *testing.T) {
+	// Anonymous default exports are named after the file (parent dir for generic
+	// Next.js page filenames).
+	ff := extractAll(t, map[string]string{
+		"src/app/dashboard/page.tsx": `export default function() { return <div/> }`,
+		"src/components/Card.tsx":     `export default () => <div/>`,
+	}, true)
+
+	page, ok := findFact(ff, "src/app/dashboard.DashboardPage")
+	if !ok {
+		t.Fatalf("expected fact src/app/dashboard.DashboardPage; got %v", factNames(ff))
+	}
+	if page.Props["exported"] != true {
+		t.Errorf("page exported = %v, want true", page.Props["exported"])
+	}
+	if page.Props["web_component"] != "component" {
+		t.Errorf("page web_component = %v, want component", page.Props["web_component"])
+	}
+
+	card, ok := findFact(ff, "src/components.Card")
+	if !ok {
+		t.Fatalf("expected fact src/components.Card (anon default arrow); got %v", factNames(ff))
+	}
+	if card.Props["web_component"] != "component" {
+		t.Errorf("card web_component = %v, want component", card.Props["web_component"])
+	}
+}
+
+func TestExtract_MemoWrappedComponent(t *testing.T) {
+	ff := extractAll(t, map[string]string{
+		"src/components/Card.tsx": `import { memo } from 'react'
+const Card = memo(function Card() { return <div/> })
+export default Card`,
+	}, true)
+
+	f, ok := findFact(ff, "src/components.Card")
+	if !ok {
+		t.Fatalf("expected fact src/components.Card; got %v", factNames(ff))
+	}
+	// memo-wrapped value should be a function/component, not a plain variable.
+	if f.Props["symbol_kind"] != facts.SymbolFunc {
+		t.Errorf("symbol_kind = %v, want function (memo-wrapped)", f.Props["symbol_kind"])
+	}
+	if f.Props["web_component"] != "component" {
+		t.Errorf("web_component = %v, want component", f.Props["web_component"])
+	}
+	// Exported via `export default Card`.
+	if f.Props["exported"] != true {
+		t.Errorf("exported = %v, want true (export default Card)", f.Props["exported"])
+	}
+}
+
+func TestExtract_ReExportMarksExported(t *testing.T) {
+	ff := extractAll(t, map[string]string{
+		"src/utils.ts": `function helper() { return 1 }
+const value = 2
+export { helper, value }`,
+	}, false)
+
+	helper, ok := findFact(ff, "src.helper")
+	if !ok {
+		t.Fatal("expected fact src.helper")
+	}
+	if helper.Props["exported"] != true {
+		t.Errorf("helper exported = %v, want true (export { helper })", helper.Props["exported"])
+	}
+	value, ok := findFact(ff, "src.value")
+	if !ok {
+		t.Fatal("expected fact src.value")
+	}
+	if value.Props["exported"] != true {
+		t.Errorf("value exported = %v, want true (export { value })", value.Props["exported"])
+	}
+}
+
+func TestExtract_HookClassification(t *testing.T) {
+	ff := extractAll(t, map[string]string{
+		"src/hooks/useAuth.ts": `export function useAuth() { return null }
+export const useUser = () => null`,
+	}, false)
+
+	for _, name := range []string{"src/hooks.useAuth", "src/hooks.useUser"} {
+		f, ok := findFact(ff, name)
+		if !ok {
+			t.Fatalf("expected fact %s", name)
+		}
+		if f.Props["web_component"] != "hook" {
+			t.Errorf("%s web_component = %v, want hook", name, f.Props["web_component"])
+		}
+		if f.Props["framework"] != "react" {
+			t.Errorf("%s framework = %v, want react", name, f.Props["framework"])
+		}
+	}
+}
+
+func TestExtract_RouteHandlerClassification(t *testing.T) {
+	ff := extractAll(t, map[string]string{
+		"src/app/api/users/route.ts": `export async function GET() { return Response.json([]) }
+export async function POST() { return Response.json({}) }`,
+	}, true)
+
+	get, ok := findFact(ff, "src/app/api/users.GET")
+	if !ok {
+		t.Fatalf("expected fact src/app/api/users.GET; got %v", factNames(ff))
+	}
+	if get.Props["web_component"] != "route_handler" {
+		t.Errorf("GET web_component = %v, want route_handler", get.Props["web_component"])
+	}
+	if get.Props["method"] != "GET" {
+		t.Errorf("GET method = %v, want GET", get.Props["method"])
+	}
+	if _, ok := findFact(ff, "src/app/api/users.POST"); !ok {
+		t.Error("expected fact src/app/api/users.POST")
+	}
+}
+
+func TestExtract_Enum(t *testing.T) {
+	ff := extractAll(t, map[string]string{
+		"src/types/colors.ts": `export enum Color { Red, Green, Blue }`,
+	}, false)
+
+	f, ok := findFact(ff, "src/types.Color")
+	if !ok {
+		t.Fatalf("expected fact src/types.Color; got %v", factNames(ff))
+	}
+	if f.Props["symbol_kind"] != facts.SymbolEnum {
+		t.Errorf("symbol_kind = %v, want enum", f.Props["symbol_kind"])
+	}
+	if f.Props["exported"] != true {
+		t.Errorf("exported = %v, want true", f.Props["exported"])
+	}
+}
+
+func TestExtract_NonComponentClassNotClassified(t *testing.T) {
+	// A PascalCase service class with no JSX in a .ts file must not be tagged a component.
+	ff := extractAll(t, map[string]string{
+		"src/services/ApiClient.ts": `export class ApiClient { fetchAll() { return [] } }`,
+	}, false)
+
+	f, ok := findFact(ff, "src/services.ApiClient")
+	if !ok {
+		t.Fatal("expected fact src/services.ApiClient")
+	}
+	if _, tagged := f.Props["web_component"]; tagged {
+		t.Errorf("ApiClient should not be classified as a component; got %v", f.Props["web_component"])
+	}
+}
+
+func factNames(ff []facts.Fact) []string {
+	var names []string
+	for _, f := range ff {
+		if f.Kind == facts.KindSymbol {
+			names = append(names, f.Name)
+		}
+	}
+	return names
+}
+
 func TestIsTypeScriptFile(t *testing.T) {
 	tests := []struct {
 		path string

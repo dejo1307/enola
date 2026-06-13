@@ -49,6 +49,7 @@ const (
 	SymbolClass     = "class"
 	SymbolVariable  = "variable"
 	SymbolConstant  = "constant"
+	SymbolEnum      = "enum"
 )
 
 // Insight represents an architectural insight produced by an explainer.

@@ -139,6 +139,17 @@ func (e *TSExtractor) Extract(ctx context.Context, repoPath string, files []stri
 	return allFacts, nil
 }
 
+// extractCtx bundles the per-file state threaded through declaration extraction
+// so symbols can be enriched with React/Next.js semantic classification.
+type extractCtx struct {
+	src       []byte
+	relFile   string
+	dir       string
+	isTSX     bool
+	isNextJS  bool
+	importMap map[string]string
+}
+
 func (e *TSExtractor) extractFile(src []byte, relFile string, isNextJS bool, aliases map[string]string) []facts.Fact {
 	var result []facts.Fact
 
@@ -151,8 +162,9 @@ func (e *TSExtractor) extractFile(src []byte, relFile string, isNextJS bool, ali
 	// Hand-written fetch / makeRequest API calls are also client-role routes.
 	result = append(result, extractHTTPClientFacts(src, relFile)...)
 
+	isTSX := strings.HasSuffix(relFile, ".tsx") || strings.HasSuffix(relFile, ".jsx")
 	lang := typescript.LanguageTypescript()
-	if strings.HasSuffix(relFile, ".tsx") {
+	if isTSX {
 		lang = typescript.LanguageTSX()
 	}
 
@@ -167,8 +179,32 @@ func (e *TSExtractor) extractFile(src []byte, relFile string, isNextJS bool, ali
 
 	// Extract from the tree
 	result = append(result, e.extractImports(root, src, relFile, aliases)...)
-	importMap := buildImportSymbols(root, src, relFile, aliases)
-	result = append(result, e.extractDeclarations(root, src, relFile, importMap)...)
+
+	ctx := &extractCtx{
+		src:       src,
+		relFile:   relFile,
+		dir:       filepath.Dir(relFile),
+		isTSX:     isTSX,
+		isNextJS:  isNextJS,
+		importMap: buildImportSymbols(root, src, relFile, aliases),
+	}
+	decls := e.extractDeclarations(root, ctx)
+
+	// A declaration may be exported via a separate `export { A, B }` clause or
+	// `export default Name` statement rather than an inline `export` keyword.
+	// Mark the corresponding symbols as exported.
+	if exported := collectExportedLocalNames(root, src); len(exported) > 0 {
+		for i := range decls {
+			if decls[i].Kind != facts.KindSymbol {
+				continue
+			}
+			local := decls[i].Name[strings.LastIndexByte(decls[i].Name, '.')+1:]
+			if exported[local] {
+				decls[i].Props["exported"] = true
+			}
+		}
+	}
+	result = append(result, decls...)
 
 	// Detect Next.js routes
 	if isNextJS {
@@ -224,227 +260,271 @@ func (e *TSExtractor) extractImports(root *sitter.Node, src []byte, relFile stri
 	return result
 }
 
-func (e *TSExtractor) extractDeclarations(root *sitter.Node, src []byte, relFile string, importMap map[string]string) []facts.Fact {
+func (e *TSExtractor) extractDeclarations(root *sitter.Node, ctx *extractCtx) []facts.Fact {
 	var result []facts.Fact
-	dir := filepath.Dir(relFile)
-
 	for i := range root.ChildCount() {
-		child := root.Child(i)
-		ff := e.extractNode(child, src, relFile, dir, false, importMap)
-		result = append(result, ff...)
+		result = append(result, e.extractNode(root.Child(i), ctx, false, "")...)
 	}
-
 	return result
 }
 
-func (e *TSExtractor) extractNode(node *sitter.Node, src []byte, relFile, dir string, isExported bool, importMap map[string]string) []facts.Fact {
+// extractNode emits facts for a single declaration node. fallbackName supplies a
+// name for anonymous default-exported declarations (e.g. `export default function
+// () {}`), derived from the file name; it is ignored when the declaration has its
+// own name.
+func (e *TSExtractor) extractNode(node *sitter.Node, ctx *extractCtx, isExported bool, fallbackName string) []facts.Fact {
 	var result []facts.Fact
+	src, dir, relFile := ctx.src, ctx.dir, ctx.relFile
 
 	switch node.Kind() {
 	case "export_statement":
-		// Process the declaration inside the export
-		decl := findChildByKind(node, "function_declaration")
-		if decl == nil {
-			decl = findChildByKind(node, "class_declaration")
+		isDefault := hasChildKind(node, "default")
+		fb := ""
+		if isDefault {
+			fb = fileSymbolName(relFile)
 		}
-		if decl == nil {
-			decl = findChildByKind(node, "interface_declaration")
+		// Named/inline declaration inside the export.
+		if decl := firstDeclChild(node); decl != nil {
+			return e.extractNode(decl, ctx, true, fb)
 		}
-		if decl == nil {
-			decl = findChildByKind(node, "type_alias_declaration")
-		}
-		if decl == nil {
-			decl = findChildByKind(node, "lexical_declaration")
-		}
-		if decl != nil {
-			return e.extractNode(decl, src, relFile, dir, true, importMap)
+		// Anonymous default export of a value: name it after the file.
+		if isDefault {
+			for _, k := range []string{"function_expression", "generator_function", "class", "arrow_function", "call_expression"} {
+				if c := findChildByKind(node, k); c != nil {
+					return e.extractNode(c, ctx, true, fb)
+				}
+			}
 		}
 
-	case "function_declaration":
+	case "function_declaration", "function_expression", "generator_function_declaration", "generator_function":
 		name := findChildByKind(node, "identifier")
+		symbolName := fallbackName
 		if name != nil {
-			symbolName := nodeText(name, src)
-			rels := []facts.Relation{{Kind: facts.RelDeclares, Target: dir}}
-			rels = append(rels, collectCalls(node, src, dir, "", importMap)...)
-			result = append(result, facts.Fact{
-				Kind: facts.KindSymbol,
-				Name: dir + "." + symbolName,
-				File: relFile,
-				Line: int(node.StartPosition().Row) + 1,
-				Props: map[string]any{
-					"symbol_kind": facts.SymbolFunc,
-					"exported":    isExported,
-					"language":    "typescript",
-				},
-				Relations: rels,
-			})
+			symbolName = nodeText(name, src)
+		}
+		if symbolName == "" {
+			break
+		}
+		result = append(result, e.funcSymbol(node, node, ctx, symbolName, isExported))
+
+	case "arrow_function":
+		if fallbackName != "" {
+			result = append(result, e.funcSymbol(node, node, ctx, fallbackName, isExported))
 		}
 
-	case "class_declaration":
+	case "call_expression":
+		// Reached for `export default memo(...)` / `forwardRef(...)`.
+		if fallbackName != "" {
+			result = append(result, e.funcSymbol(node, node, ctx, fallbackName, isExported))
+		}
+
+	case "class_declaration", "abstract_class_declaration", "class":
 		name := findChildByKind(node, "type_identifier")
+		symbolName := fallbackName
 		if name != nil {
+			symbolName = nodeText(name, src)
+		}
+		if symbolName == "" {
+			break
+		}
+		f := facts.Fact{
+			Kind: facts.KindSymbol,
+			Name: dir + "." + symbolName,
+			File: relFile,
+			Line: int(node.StartPosition().Row) + 1,
+			Props: map[string]any{
+				"symbol_kind": facts.SymbolClass,
+				"exported":    isExported,
+				"language":    "typescript",
+			},
+			Relations: []facts.Relation{
+				{Kind: facts.RelDeclares, Target: dir},
+			},
+		}
+
+		// Check for implements clause (nested under class_heritage)
+		for j := range node.ChildCount() {
+			c := node.Child(j)
+			if c.Kind() == "class_heritage" {
+				for k := range c.ChildCount() {
+					heritage := c.Child(k)
+					if heritage.Kind() == "implements_clause" {
+						for l := range heritage.ChildCount() {
+							t := heritage.Child(l)
+							if t.Kind() == "type_identifier" {
+								f.Relations = append(f.Relations, facts.Relation{
+									Kind:   facts.RelImplements,
+									Target: nodeText(t, src),
+								})
+							}
+						}
+					}
+				}
+			}
+		}
+
+		classBody := findChildByKind(node, "class_body")
+		classifySymbol(&f, symbolName, classBody, ctx, facts.SymbolClass)
+		result = append(result, f)
+
+		// Extract class methods
+		if classBody != nil {
+			for j := range classBody.ChildCount() {
+				member := classBody.Child(j)
+				if member.Kind() != "method_definition" && member.Kind() != "public_field_definition" {
+					continue
+				}
+				methodName := findChildByKind(member, "property_identifier")
+				if methodName == nil {
+					methodName = findChildByKind(member, "identifier")
+				}
+				if methodName == nil {
+					continue
+				}
+				mName := nodeText(methodName, src)
+				if strings.HasPrefix(mName, "#") || mName == "constructor" {
+					continue
+				}
+				isPrivate := false
+				for k := range member.ChildCount() {
+					c := member.Child(k)
+					if c.Kind() == "accessibility_modifier" && nodeText(c, src) == "private" {
+						isPrivate = true
+						break
+					}
+				}
+				mRels := []facts.Relation{{Kind: facts.RelDeclares, Target: dir}}
+				mRels = append(mRels, collectCalls(member, src, dir, symbolName, ctx.importMap)...)
+				result = append(result, facts.Fact{
+					Kind: facts.KindSymbol,
+					Name: dir + "." + symbolName + "." + mName,
+					File: relFile,
+					Line: int(member.StartPosition().Row) + 1,
+					Props: map[string]any{
+						"symbol_kind": facts.SymbolMethod,
+						"exported":    isExported && !isPrivate,
+						"language":    "typescript",
+						"receiver":    symbolName,
+					},
+					Relations: mRels,
+				})
+			}
+		}
+
+	case "interface_declaration":
+		if name := findChildByKind(node, "type_identifier"); name != nil {
+			result = append(result, e.simpleSymbol(node, ctx, nodeText(name, src), facts.SymbolInterface, isExported))
+		}
+
+	case "type_alias_declaration":
+		if name := findChildByKind(node, "type_identifier"); name != nil {
+			result = append(result, e.simpleSymbol(node, ctx, nodeText(name, src), facts.SymbolType, isExported))
+		}
+
+	case "enum_declaration":
+		name := findChildByKind(node, "identifier")
+		if name == nil {
+			name = findChildByKind(node, "type_identifier")
+		}
+		if name != nil {
+			result = append(result, e.simpleSymbol(node, ctx, nodeText(name, src), facts.SymbolEnum, isExported))
+		}
+
+	case "internal_module", "module":
+		// TypeScript `namespace X {}` / `module X {}`.
+		name := findChildByKind(node, "identifier")
+		if name == nil {
+			name = findChildByKind(node, "nested_identifier")
+		}
+		if name != nil {
+			result = append(result, e.simpleSymbol(node, ctx, nodeText(name, src), "namespace", isExported))
+		}
+
+	case "lexical_declaration", "variable_declaration":
+		for j := range node.ChildCount() {
+			decl := node.Child(j)
+			if decl.Kind() != "variable_declarator" {
+				continue
+			}
+			name := findChildByKind(decl, "identifier")
+			if name == nil {
+				continue
+			}
 			symbolName := nodeText(name, src)
+
+			// Determine the value node and the symbol kind. Arrow functions and
+			// memo/forwardRef-wrapped values are functions/components; everything
+			// else is a plain variable.
+			symbolKind := facts.SymbolVariable
+			var body *sitter.Node
+			if v := findChildByKind(decl, "arrow_function"); v != nil {
+				symbolKind = facts.SymbolFunc
+				body = v
+			} else if call := findChildByKind(decl, "call_expression"); call != nil && isComponentWrapper(call, src) {
+				symbolKind = facts.SymbolFunc
+				body = call
+			}
+
+			vRels := []facts.Relation{{Kind: facts.RelDeclares, Target: dir}}
+			if body != nil {
+				vRels = append(vRels, collectCalls(body, src, dir, "", ctx.importMap)...)
+			}
 			f := facts.Fact{
 				Kind: facts.KindSymbol,
 				Name: dir + "." + symbolName,
 				File: relFile,
 				Line: int(node.StartPosition().Row) + 1,
 				Props: map[string]any{
-					"symbol_kind": facts.SymbolClass,
+					"symbol_kind": symbolKind,
 					"exported":    isExported,
 					"language":    "typescript",
 				},
-				Relations: []facts.Relation{
-					{Kind: facts.RelDeclares, Target: dir},
-				},
+				Relations: vRels,
 			}
-
-			// Check for implements clause (nested under class_heritage)
-			for j := range node.ChildCount() {
-				c := node.Child(j)
-				if c.Kind() == "class_heritage" {
-					for k := range c.ChildCount() {
-						heritage := c.Child(k)
-						if heritage.Kind() == "implements_clause" {
-							for l := range heritage.ChildCount() {
-								t := heritage.Child(l)
-								if t.Kind() == "type_identifier" {
-									f.Relations = append(f.Relations, facts.Relation{
-										Kind:   facts.RelImplements,
-										Target: nodeText(t, src),
-									})
-								}
-							}
-						}
-					}
-				}
-			}
-
+			classifySymbol(&f, symbolName, body, ctx, symbolKind)
 			result = append(result, f)
-
-			// Extract class methods
-			classBody := findChildByKind(node, "class_body")
-			if classBody != nil {
-				for j := range classBody.ChildCount() {
-					member := classBody.Child(j)
-					if member.Kind() != "method_definition" && member.Kind() != "public_field_definition" {
-						continue
-					}
-					methodName := findChildByKind(member, "property_identifier")
-					if methodName == nil {
-						methodName = findChildByKind(member, "identifier")
-					}
-					if methodName == nil {
-						continue
-					}
-					mName := nodeText(methodName, src)
-					if strings.HasPrefix(mName, "#") || mName == "constructor" {
-						continue
-					}
-					isPrivate := false
-					for k := range member.ChildCount() {
-						c := member.Child(k)
-						if c.Kind() == "accessibility_modifier" && nodeText(c, src) == "private" {
-							isPrivate = true
-							break
-						}
-					}
-					mRels := []facts.Relation{{Kind: facts.RelDeclares, Target: dir}}
-					mRels = append(mRels, collectCalls(member, src, dir, symbolName, importMap)...)
-					result = append(result, facts.Fact{
-						Kind: facts.KindSymbol,
-						Name: dir + "." + symbolName + "." + mName,
-						File: relFile,
-						Line: int(member.StartPosition().Row) + 1,
-						Props: map[string]any{
-							"symbol_kind": facts.SymbolMethod,
-							"exported":    isExported && !isPrivate,
-							"language":    "typescript",
-							"receiver":    symbolName,
-						},
-						Relations: mRels,
-					})
-				}
-			}
-		}
-
-	case "interface_declaration":
-		name := findChildByKind(node, "type_identifier")
-		if name != nil {
-			symbolName := nodeText(name, src)
-			result = append(result, facts.Fact{
-				Kind: facts.KindSymbol,
-				Name: dir + "." + symbolName,
-				File: relFile,
-				Line: int(node.StartPosition().Row) + 1,
-				Props: map[string]any{
-					"symbol_kind": facts.SymbolInterface,
-					"exported":    isExported,
-					"language":    "typescript",
-				},
-				Relations: []facts.Relation{
-					{Kind: facts.RelDeclares, Target: dir},
-				},
-			})
-		}
-
-	case "type_alias_declaration":
-		name := findChildByKind(node, "type_identifier")
-		if name != nil {
-			symbolName := nodeText(name, src)
-			result = append(result, facts.Fact{
-				Kind: facts.KindSymbol,
-				Name: dir + "." + symbolName,
-				File: relFile,
-				Line: int(node.StartPosition().Row) + 1,
-				Props: map[string]any{
-					"symbol_kind": facts.SymbolType,
-					"exported":    isExported,
-					"language":    "typescript",
-				},
-				Relations: []facts.Relation{
-					{Kind: facts.RelDeclares, Target: dir},
-				},
-			})
-		}
-
-	case "lexical_declaration":
-		// const/let/var declarations
-		for j := range node.ChildCount() {
-			decl := node.Child(j)
-			if decl.Kind() == "variable_declarator" {
-				name := findChildByKind(decl, "identifier")
-				if name != nil {
-					symbolName := nodeText(name, src)
-					// Check if the value is an arrow function
-					symbolKind := facts.SymbolVariable
-					value := findChildByKind(decl, "arrow_function")
-					if value != nil {
-						symbolKind = facts.SymbolFunc
-					}
-
-					vRels := []facts.Relation{{Kind: facts.RelDeclares, Target: dir}}
-					if value != nil {
-						vRels = append(vRels, collectCalls(value, src, dir, "", importMap)...)
-					}
-					result = append(result, facts.Fact{
-						Kind: facts.KindSymbol,
-						Name: dir + "." + symbolName,
-						File: relFile,
-						Line: int(node.StartPosition().Row) + 1,
-						Props: map[string]any{
-							"symbol_kind": symbolKind,
-							"exported":    isExported,
-							"language":    "typescript",
-						},
-						Relations: vRels,
-					})
-				}
-			}
 		}
 	}
 
 	return result
+}
+
+// funcSymbol builds a function/component symbol fact. declNode supplies the source
+// location; body is walked for outgoing calls and JSX-based classification.
+func (e *TSExtractor) funcSymbol(declNode, body *sitter.Node, ctx *extractCtx, name string, exported bool) facts.Fact {
+	rels := []facts.Relation{{Kind: facts.RelDeclares, Target: ctx.dir}}
+	rels = append(rels, collectCalls(body, ctx.src, ctx.dir, "", ctx.importMap)...)
+	f := facts.Fact{
+		Kind: facts.KindSymbol,
+		Name: ctx.dir + "." + name,
+		File: ctx.relFile,
+		Line: int(declNode.StartPosition().Row) + 1,
+		Props: map[string]any{
+			"symbol_kind": facts.SymbolFunc,
+			"exported":    exported,
+			"language":    "typescript",
+		},
+		Relations: rels,
+	}
+	classifySymbol(&f, name, body, ctx, facts.SymbolFunc)
+	return f
+}
+
+// simpleSymbol builds a declaration-only symbol fact (interface, type, enum, namespace).
+func (e *TSExtractor) simpleSymbol(node *sitter.Node, ctx *extractCtx, name, kind string, exported bool) facts.Fact {
+	f := facts.Fact{
+		Kind: facts.KindSymbol,
+		Name: ctx.dir + "." + name,
+		File: ctx.relFile,
+		Line: int(node.StartPosition().Row) + 1,
+		Props: map[string]any{
+			"symbol_kind": kind,
+			"exported":    exported,
+			"language":    "typescript",
+		},
+		Relations: []facts.Relation{{Kind: facts.RelDeclares, Target: ctx.dir}},
+	}
+	return f
 }
 
 // detectRoute checks if a file path corresponds to a Next.js route.
@@ -589,6 +669,202 @@ func detectNextJSAt(dir string) bool {
 func isTypeScriptFile(path string) bool {
 	ext := strings.ToLower(filepath.Ext(path))
 	return ext == ".ts" || ext == ".tsx"
+}
+
+// hasChildKind reports whether node has a direct child of the given kind.
+func hasChildKind(node *sitter.Node, kind string) bool {
+	return findChildByKind(node, kind) != nil
+}
+
+// firstDeclChild returns the first named declaration child of an export_statement,
+// or nil if the export wraps something else (a value, re-export clause, etc.).
+func firstDeclChild(node *sitter.Node) *sitter.Node {
+	for _, k := range []string{
+		"function_declaration", "generator_function_declaration",
+		"class_declaration", "abstract_class_declaration",
+		"interface_declaration", "type_alias_declaration",
+		"lexical_declaration", "variable_declaration",
+		"enum_declaration", "internal_module", "module",
+	} {
+		if c := findChildByKind(node, k); c != nil {
+			return c
+		}
+	}
+	return nil
+}
+
+// fileSymbolName derives a symbol name from a file path for anonymous default
+// exports. Generic Next.js filenames (page, route, layout, …) are disambiguated
+// with their parent directory segment, e.g. app/dashboard/page.tsx → "DashboardPage".
+func fileSymbolName(relFile string) string {
+	base := filepath.Base(relFile)
+	base = strings.TrimSuffix(base, filepath.Ext(base))
+	switch base {
+	case "index", "page", "route", "layout", "loading", "error", "not-found", "template", "default":
+		parent := filepath.Base(filepath.Dir(relFile))
+		if parent != "" && parent != "." && parent != string(filepath.Separator) {
+			return toPascal(parent) + toPascal(base)
+		}
+	}
+	return toPascal(base)
+}
+
+// toPascal converts an arbitrary identifier-ish string into PascalCase, splitting
+// on any non-alphanumeric characters (e.g. "my-component" → "MyComponent").
+func toPascal(s string) string {
+	var b strings.Builder
+	upNext := true
+	for _, r := range s {
+		switch {
+		case (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9'):
+			if upNext && r >= 'a' && r <= 'z' {
+				r -= 'a' - 'A'
+			}
+			b.WriteRune(r)
+			upNext = false
+		default:
+			upNext = true
+		}
+	}
+	return b.String()
+}
+
+// collectExportedLocalNames returns the set of locally-declared names that are
+// exported via a separate `export { A, B as C }` clause or `export default Name`
+// statement (where the declaration itself carries no inline export keyword).
+func collectExportedLocalNames(root *sitter.Node, src []byte) map[string]bool {
+	out := make(map[string]bool)
+	for i := range root.ChildCount() {
+		child := root.Child(i)
+		if child.Kind() != "export_statement" {
+			continue
+		}
+		// export { A, B as C }
+		if clause := findChildByKind(child, "export_clause"); clause != nil {
+			for j := range clause.ChildCount() {
+				spec := clause.Child(j)
+				if spec.Kind() != "export_specifier" {
+					continue
+				}
+				if n := spec.ChildByFieldName("name"); n != nil {
+					out[nodeText(n, src)] = true
+				}
+			}
+			continue
+		}
+		// export default Name
+		if hasChildKind(child, "default") {
+			if id := findChildByKind(child, "identifier"); id != nil {
+				out[nodeText(id, src)] = true
+			}
+		}
+	}
+	return out
+}
+
+// reactHTTPMethods are the App Router route-handler export names.
+var reactHTTPMethods = map[string]bool{
+	"GET": true, "POST": true, "PUT": true, "DELETE": true,
+	"PATCH": true, "HEAD": true, "OPTIONS": true,
+}
+
+// classifySymbol enriches a symbol fact with React/Next.js semantic props
+// (web_component, framework, and for route handlers method), mirroring the
+// ios_component/framework classification used by the Swift extractor. body, when
+// non-nil, is scanned for JSX to confirm component-ness in non-TSX files.
+func classifySymbol(f *facts.Fact, name string, body *sitter.Node, ctx *extractCtx, symbolKind string) {
+	// Next.js App Router route handler: GET/POST/... in a route.{ts,tsx} file.
+	if symbolKind == facts.SymbolFunc && reactHTTPMethods[name] && isAppRouteFile(ctx.relFile) {
+		f.Props["web_component"] = "route_handler"
+		f.Props["method"] = name
+		f.Props["framework"] = "nextjs"
+		return
+	}
+	// React hook: a useXxx function.
+	if symbolKind == facts.SymbolFunc && isHookName(name) {
+		f.Props["web_component"] = "hook"
+		f.Props["framework"] = "react"
+		return
+	}
+	// React component: a PascalCase function/class that renders JSX. In .tsx/.jsx
+	// files a PascalCase function/class is treated as a component; elsewhere we
+	// require literal JSX in the body to avoid misclassifying plain classes.
+	if isComponentName(name) && (symbolKind == facts.SymbolFunc || symbolKind == facts.SymbolClass) {
+		if ctx.isTSX || (body != nil && containsJSX(body)) {
+			f.Props["web_component"] = "component"
+			if ctx.isNextJS {
+				f.Props["framework"] = "nextjs"
+			} else {
+				f.Props["framework"] = "react"
+			}
+		}
+	}
+}
+
+// isHookName reports whether name follows the React hook convention useXxx.
+func isHookName(name string) bool {
+	if !strings.HasPrefix(name, "use") || len(name) < 4 {
+		return false
+	}
+	c := name[3]
+	return c >= 'A' && c <= 'Z'
+}
+
+// isComponentName reports whether name is PascalCase (a React component convention).
+func isComponentName(name string) bool {
+	return name != "" && name[0] >= 'A' && name[0] <= 'Z'
+}
+
+// isAppRouteFile reports whether relFile is a Next.js App Router route handler
+// file (a route.{ts,tsx} under an "app" directory segment).
+func isAppRouteFile(relFile string) bool {
+	base := filepath.Base(relFile)
+	base = strings.TrimSuffix(strings.TrimSuffix(base, ".tsx"), ".ts")
+	if base != "route" {
+		return false
+	}
+	for _, seg := range strings.Split(filepath.ToSlash(relFile), "/") {
+		if seg == "app" {
+			return true
+		}
+	}
+	return false
+}
+
+// containsJSX reports whether the subtree rooted at node contains a JSX element.
+func containsJSX(node *sitter.Node) bool {
+	if node == nil {
+		return false
+	}
+	switch node.Kind() {
+	case "jsx_element", "jsx_self_closing_element", "jsx_fragment":
+		return true
+	}
+	for i := range node.ChildCount() {
+		if containsJSX(node.Child(i)) {
+			return true
+		}
+	}
+	return false
+}
+
+// isComponentWrapper reports whether a call expression wraps a component, i.e. it
+// calls memo / forwardRef (optionally as React.memo / React.forwardRef).
+func isComponentWrapper(call *sitter.Node, src []byte) bool {
+	fn := call.ChildByFieldName("function")
+	if fn == nil {
+		return false
+	}
+	name := ""
+	switch fn.Kind() {
+	case "identifier":
+		name = nodeText(fn, src)
+	case "member_expression":
+		if prop := fn.ChildByFieldName("property"); prop != nil {
+			name = nodeText(prop, src)
+		}
+	}
+	return name == "memo" || name == "forwardRef"
 }
 
 func findChildByKind(node *sitter.Node, kind string) *sitter.Node {

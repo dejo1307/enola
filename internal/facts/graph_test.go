@@ -2,6 +2,7 @@ package facts
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -142,6 +143,26 @@ func TestTraverse_MaxNodesLimit(t *testing.T) {
 	}
 	if !result.Stats.Truncated {
 		t.Error("should be truncated with maxNodes=3")
+	}
+}
+
+func TestTraverse_EdgesConsistentWhenTruncated(t *testing.T) {
+	g, _ := buildTestGraph()
+
+	// maxNodes=2 truncates the result; every returned edge must still reference
+	// only nodes present in result.Nodes (no dangling edges to capped-out nodes).
+	result := g.Traverse("A", "forward", nil, nil, 10, 2)
+	if !result.Stats.Truncated {
+		t.Fatal("expected truncation with maxNodes=2")
+	}
+	inSet := map[string]bool{}
+	for _, n := range result.Nodes {
+		inSet[n.Name] = true
+	}
+	for _, e := range result.Edges {
+		if !inSet[e.Source] || !inSet[e.Target] {
+			t.Errorf("edge %s -> %s references a node absent from result.Nodes %v", e.Source, e.Target, nodeNames(result.Nodes))
+		}
 	}
 }
 
@@ -355,6 +376,62 @@ func TestImpactSet_Basic(t *testing.T) {
 
 	if result.Summary == "" {
 		t.Error("summary should not be empty")
+	}
+}
+
+func TestReachableCount(t *testing.T) {
+	g, _ := buildTestGraph()
+
+	// Reverse from C: B and E depend on C directly, A transitively. 3 total.
+	if got := g.reachableCount([]string{"C"}, "reverse", 10); got != 3 {
+		t.Errorf("reachableCount(C, reverse) = %d, want 3", got)
+	}
+	// Forward from A: B, E (direct), C, D (transitive). 4 total.
+	if got := g.reachableCount([]string{"A"}, "forward", 10); got != 4 {
+		t.Errorf("reachableCount(A, forward) = %d, want 4", got)
+	}
+	// Depth limit: reverse from C at depth 1 reaches only B and E.
+	if got := g.reachableCount([]string{"C"}, "reverse", 1); got != 2 {
+		t.Errorf("reachableCount(C, reverse, depth 1) = %d, want 2", got)
+	}
+}
+
+func TestReachableCount_Cyclic(t *testing.T) {
+	g, _ := buildCyclicGraph()
+	// A -> B -> C -> A. Reverse from A reaches C then B (A is the seed). 2 total,
+	// and the cycle must not loop forever.
+	if got := g.reachableCount([]string{"A"}, "reverse", 10); got != 2 {
+		t.Errorf("reachableCount(A, reverse) on cycle = %d, want 2", got)
+	}
+}
+
+func TestImpactSet_TotalDependents(t *testing.T) {
+	g, _ := buildTestGraph()
+
+	// Not truncated: total equals the shown dependents (B, E, A = 3).
+	result := g.ImpactSet("C", 10, 100, false)
+	if result.TotalDependents != 3 {
+		t.Errorf("TotalDependents = %d, want 3", result.TotalDependents)
+	}
+	if strings.Contains(result.Summary, "showing") {
+		t.Errorf("summary should not mention 'showing' when not truncated: %q", result.Summary)
+	}
+}
+
+func TestImpactSet_TotalDependents_Truncated(t *testing.T) {
+	g, _ := buildTestGraph()
+
+	// maxNodes=2 leaves room for the seed (C) plus one dependent, so the display
+	// is truncated but the total must still report all 3 dependents.
+	result := g.ImpactSet("C", 10, 2, false)
+	if result.TotalDependents != 3 {
+		t.Errorf("TotalDependents = %d, want 3 (accurate despite cap)", result.TotalDependents)
+	}
+	if !result.Stats.Truncated {
+		t.Error("expected Stats.Truncated with maxNodes=2")
+	}
+	if !strings.Contains(result.Summary, "3 total dependents (showing 1)") {
+		t.Errorf("summary should report accurate total and showing count; got %q", result.Summary)
 	}
 }
 
