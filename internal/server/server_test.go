@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -187,6 +188,63 @@ func TestExploreModule(t *testing.T) {
 	// Should show the symbols table
 	if !strings.Contains(output, "Symbols (3)") {
 		t.Error("missing symbols count")
+	}
+}
+
+func TestExploreModule_NestedModules(t *testing.T) {
+	// A directory module ("src/app") with only one directly-declared symbol, but
+	// many symbols in nested child modules. exploreModule must surface the subtree
+	// so the nested symbols are discoverable, not just the one direct symbol.
+	store := facts.NewStore()
+	store.Add(
+		facts.Fact{Kind: facts.KindModule, Name: "src/app", File: "src/app",
+			Props: map[string]any{"language": "typescript"}},
+		facts.Fact{Kind: facts.KindSymbol, Name: "src/app.Layout", File: "src/app/layout.tsx", Line: 1,
+			Props:     map[string]any{"symbol_kind": "function", "exported": true, "language": "typescript"},
+			Relations: []facts.Relation{{Kind: facts.RelDeclares, Target: "src/app"}}},
+		// Nested module: src/app/dashboard
+		facts.Fact{Kind: facts.KindModule, Name: "src/app/dashboard", File: "src/app/dashboard",
+			Props: map[string]any{"language": "typescript"}},
+		facts.Fact{Kind: facts.KindSymbol, Name: "src/app/dashboard.Page", File: "src/app/dashboard/page.tsx", Line: 1,
+			Props:     map[string]any{"symbol_kind": "function", "exported": true, "language": "typescript"},
+			Relations: []facts.Relation{{Kind: facts.RelDeclares, Target: "src/app/dashboard"}}},
+		// Deeper nested module: src/app/dashboard/settings
+		facts.Fact{Kind: facts.KindModule, Name: "src/app/dashboard/settings", File: "src/app/dashboard/settings",
+			Props: map[string]any{"language": "typescript"}},
+		facts.Fact{Kind: facts.KindSymbol, Name: "src/app/dashboard/settings.Page", File: "src/app/dashboard/settings/page.tsx", Line: 1,
+			Props:     map[string]any{"symbol_kind": "function", "exported": true, "language": "typescript"},
+			Relations: []facts.Relation{{Kind: facts.RelDeclares, Target: "src/app/dashboard/settings"}}},
+		// Another immediate child: src/app/admin
+		facts.Fact{Kind: facts.KindModule, Name: "src/app/admin", File: "src/app/admin",
+			Props: map[string]any{"language": "typescript"}},
+		facts.Fact{Kind: facts.KindSymbol, Name: "src/app/admin.Page", File: "src/app/admin/page.tsx", Line: 1,
+			Props:     map[string]any{"symbol_kind": "function", "exported": true, "language": "typescript"},
+			Relations: []facts.Relation{{Kind: facts.RelDeclares, Target: "src/app/admin"}}},
+	)
+	srv := newTestServer(store)
+
+	var sb strings.Builder
+	found := srv.exploreModule(store, "src/app", 1, &sb)
+	if !found {
+		t.Fatal("exploreModule should find 'src/app'")
+	}
+	output := sb.String()
+
+	// Nested-modules section with the 2 immediate children.
+	if !strings.Contains(output, "## Nested modules (2)") {
+		t.Errorf("missing nested modules section; got:\n%s", output)
+	}
+	// Aggregate covers all 3 nested modules and 3 nested symbols (dashboard,
+	// dashboard/settings, admin), not just the direct one.
+	if !strings.Contains(output, "Subtree: 3 modules, 3 symbols") {
+		t.Errorf("missing/incorrect subtree aggregate; got:\n%s", output)
+	}
+	// Immediate children listed; dashboard has a descendant so it shows a count.
+	if !strings.Contains(output, "src/app/dashboard (2 modules)") {
+		t.Errorf("expected dashboard child with descendant count; got:\n%s", output)
+	}
+	if !strings.Contains(output, "- src/app/admin\n") {
+		t.Errorf("expected admin child listed; got:\n%s", output)
 	}
 }
 
@@ -1219,6 +1277,106 @@ func itoa(n int) string {
 }
 
 // --- response wrapper marshaling tests ---
+
+func TestRenderImpactCompact(t *testing.T) {
+	resp := impactResponse{
+		ImpactResult: facts.ImpactResult{
+			Target:          "src/stores.useAuthStore",
+			TotalDependents: 312,
+			Summary:         "312 total dependents (showing 2) — depth 1: 2 symbols",
+			ByDepth: map[int][]facts.TraversalNode{
+				1: {
+					{Name: "src/components.UserForm", Kind: "symbol", File: "src/components/UserForm.tsx", Line: 38, Depth: 1},
+					{Name: "src/stores.useAuth", Kind: "symbol", File: "src/stores/authStore.ts", Line: 746, Depth: 1},
+				},
+			},
+			Stats: facts.TraversalStats{NodesVisited: 200, MaxDepthReached: 3, Truncated: true},
+		},
+	}
+	out := renderImpactCompact(resp)
+
+	for _, want := range []string{
+		"# Impact: src/stores.useAuthStore",
+		"312 total dependents (showing 2)",
+		"## Depth 1 (2)",
+		"src/components.UserForm",
+		"src/components/UserForm.tsx:38",
+		"truncated",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("compact impact output missing %q; got:\n%s", want, out)
+		}
+	}
+	// Must not dump the raw edges array.
+	if strings.Contains(out, "\"edges\"") {
+		t.Errorf("compact output should not contain raw JSON edges; got:\n%s", out)
+	}
+}
+
+func TestRenderImpactCompact_PerDepthCap(t *testing.T) {
+	var nodes []facts.TraversalNode
+	for i := 0; i < compactPerDepthCap+5; i++ {
+		nodes = append(nodes, facts.TraversalNode{
+			Name: fmt.Sprintf("pkg.Sym%d", i), Kind: "symbol", Depth: 1,
+		})
+	}
+	resp := impactResponse{ImpactResult: facts.ImpactResult{
+		Target:          "pkg.Core",
+		TotalDependents: len(nodes),
+		Summary:         fmt.Sprintf("%d total dependents — depth 1: %d symbols", len(nodes), len(nodes)),
+		ByDepth:         map[int][]facts.TraversalNode{1: nodes},
+	}}
+	out := renderImpactCompact(resp)
+	if !strings.Contains(out, "... and 5 more at depth 1") {
+		t.Errorf("expected per-depth cap note; got:\n%s", out)
+	}
+}
+
+func TestRenderImpactCompact_AmbiguousResolution(t *testing.T) {
+	resp := impactResponse{
+		Resolution: &nameResolution{
+			Query:     "Page",
+			Ambiguous: true,
+			Candidates: []scoredCandidate{
+				{Name: "src/app/login.LoginPage", Kind: "symbol", File: "src/app/login/page.tsx"},
+				{Name: "src/app/profile.ProfilePage", Kind: "symbol", File: "src/app/profile/page.tsx"},
+			},
+		},
+		ImpactResult: facts.ImpactResult{Target: "Page", ByDepth: map[int][]facts.TraversalNode{}},
+	}
+	out := renderImpactCompact(resp)
+	if !strings.Contains(out, "Ambiguous") || !strings.Contains(out, "LoginPage") {
+		t.Errorf("expected ambiguous candidate listing; got:\n%s", out)
+	}
+	if strings.Contains(out, "## Depth") {
+		t.Errorf("ambiguous-refused output should not list depths; got:\n%s", out)
+	}
+}
+
+func TestRenderTraverseCompact(t *testing.T) {
+	resp := traverseResponse{
+		TraversalResult: facts.TraversalResult{
+			Nodes: []facts.TraversalNode{
+				{Name: "start.Node", Kind: "symbol", Depth: 0},
+				{Name: "dep.A", Kind: "symbol", File: "a.ts", Line: 3, Depth: 1},
+			},
+			Edges: []facts.TraversalEdge{{Source: "dep.A", Target: "start.Node", Kind: "calls"}},
+			Stats: facts.TraversalStats{NodesVisited: 2, MaxDepthReached: 1},
+		},
+	}
+	out := renderTraverseCompact(resp, "start.Node", "reverse")
+	for _, want := range []string{
+		"# Traverse: start.Node (reverse)",
+		"Reached **1** nodes",
+		"## Depth 1 (1)",
+		"dep.A",
+		"Edges: 1",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("compact traverse output missing %q; got:\n%s", want, out)
+		}
+	}
+}
 
 func TestTraverseResponse_MarshalWithResolution(t *testing.T) {
 	resp := traverseResponse{
