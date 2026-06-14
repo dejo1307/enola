@@ -13,6 +13,9 @@ func astExtract(t *testing.T, filename, src string, isDjango bool) []facts.Fact 
 	t.Helper()
 	dir := t.TempDir()
 	path := filepath.Join(dir, filename)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(path, []byte(src), 0o644); err != nil {
 		t.Fatal(err)
 	}

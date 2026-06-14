@@ -61,11 +61,8 @@ class Order:
     def calculate(self):
         return self.total * 1.2
 `
-	f := writeAndOpen(t, "order.py", src)
-	defer f.Close()
-
 	relFile := "app/models/order.py"
-	result := extractFile(f, relFile, false)
+	result := astExtract(t, relFile, src, false)
 	idx := byName(result)
 
 	// Class fact: module.ClassName
@@ -107,11 +104,8 @@ def helper(x, y):
 async def fetch_data(url):
     pass
 `
-	f := writeAndOpen(t, "utils.py", src)
-	defer f.Close()
-
 	relFile := "services/utils.py"
-	result := extractFile(f, relFile, false)
+	result := astExtract(t, relFile, src, false)
 	idx := byName(result)
 
 	helperName := mod(relFile) + ".helper"
@@ -142,11 +136,8 @@ class VespaSink(EmbeddingsSink):
     def send(self, data):
         pass
 `
-	f := writeAndOpen(t, "vespa_sink.py", src)
-	defer f.Close()
-
 	relFile := "sinks/vespa_sink.py"
-	result := extractFile(f, relFile, false)
+	result := astExtract(t, relFile, src, false)
 	idx := byName(result)
 
 	clsName := mod(relFile) + ".VespaSink"
@@ -167,11 +158,8 @@ class FeatureGroup(Base, TimestampMixin):
     def validate(self):
         pass
 `
-	f := writeAndOpen(t, "feature_group.py", src)
-	defer f.Close()
-
 	relFile := "db/models/feature_group.py"
-	result := extractFile(f, relFile, false)
+	result := astExtract(t, relFile, src, false)
 	idx := byName(result)
 
 	clsName := mod(relFile) + ".FeatureGroup"
@@ -192,11 +180,8 @@ func TestExtractFile_ClassInheritance_GenericBase(t *testing.T) {
 class CRUDEntity(CRUDBase[ModelType, IdType]):
     pass
 `
-	f := writeAndOpen(t, "crud.py", src)
-	defer f.Close()
-
 	relFile := "db/crud/crud.py"
-	result := extractFile(f, relFile, false)
+	result := astExtract(t, relFile, src, false)
 	idx := byName(result)
 
 	clsName := mod(relFile) + ".CRUDEntity"
@@ -220,11 +205,8 @@ class Outer:
     def outer_method(self):
         pass
 `
-	f := writeAndOpen(t, "nested.py", src)
-	defer f.Close()
-
 	relFile := "pkg/nested.py"
-	result := extractFile(f, relFile, false)
+	result := astExtract(t, relFile, src, false)
 	idx := byName(result)
 
 	outerName := mod(relFile) + ".Outer"
@@ -265,11 +247,8 @@ class Recommender:
     async def recommend(self, user_id):
         pass
 `
-	f := writeAndOpen(t, "recommender.py", src)
-	defer f.Close()
-
 	relFile := "services/recommender.py"
-	result := extractFile(f, relFile, false)
+	result := astExtract(t, relFile, src, false)
 	idx := byName(result)
 
 	methodName := mod(relFile) + ".Recommender.recommend"
@@ -291,11 +270,8 @@ import logging
 import os
 import fastapi
 `
-	f := writeAndOpen(t, "app.py", src)
-	defer f.Close()
-
 	relFile := "myapp/app.py"
-	result := extractFile(f, relFile, false)
+	result := astExtract(t, relFile, src, false)
 	idx := byName(result)
 
 	for _, target := range []string{"logging", "os", "fastapi"} {
@@ -320,11 +296,8 @@ from fastapi import APIRouter, Depends
 from query_recommender.models.filters import VespaSearchFilters
 from .base import Base
 `
-	f := writeAndOpen(t, "routes.py", src)
-	defer f.Close()
-
 	relFile := "routes/routes.py"
-	result := extractFile(f, relFile, false)
+	result := astExtract(t, relFile, src, false)
 	idx := byName(result)
 
 	cases := []struct {
@@ -361,11 +334,8 @@ router = APIRouter()
 async def health_check():
     return {"status": "ok"}
 `
-	f := writeAndOpen(t, "health.py", src)
-	defer f.Close()
-
 	relFile := "routes/health.py"
-	result := extractFile(f, relFile, false)
+	result := astExtract(t, relFile, src, false)
 	routes := factsByKind(result, facts.KindRoute)
 
 	if len(routes) != 1 {
@@ -398,11 +368,8 @@ router = APIRouter()
 async def post_recommend_v2(body: RecommendV2Body) -> RecommendV2Response:
     pass
 `
-	f := writeAndOpen(t, "recommend.py", src)
-	defer f.Close()
-
 	relFile := "routes/recommend.py"
-	result := extractFile(f, relFile, false)
+	result := astExtract(t, relFile, src, false)
 	routes := factsByKind(result, facts.KindRoute)
 
 	if len(routes) != 1 {
@@ -433,10 +400,7 @@ async def create_item():
 async def delete_item(id: int):
     pass
 `
-	f := writeAndOpen(t, "items.py", src)
-	defer f.Close()
-
-	result := extractFile(f, "routes/items.py", false)
+	result := astExtract(t, "routes/items.py", src, false)
 	routes := factsByKind(result, facts.KindRoute)
 
 	if len(routes) != 3 {
@@ -462,10 +426,7 @@ router = APIRouter()
 async def login():
     pass
 `
-	f := writeAndOpen(t, "auth.py", src)
-	defer f.Close()
-
-	result := extractFile(f, "routes/auth.py", false)
+	result := astExtract(t, "routes/auth.py", src, false)
 	routes := factsByKind(result, facts.KindRoute)
 
 	if len(routes) != 1 {
@@ -486,11 +447,8 @@ class FeatureGroup(Base):
     id: Mapped[int]
     name: Mapped[str]
 `
-	f := writeAndOpen(t, "feature_group.py", src)
-	defer f.Close()
-
 	relFile := "db/models/feature_group.py"
-	result := extractFile(f, relFile, false)
+	result := astExtract(t, relFile, src, false)
 	storages := factsByKind(result, facts.KindStorage)
 
 	if len(storages) != 1 {
@@ -529,11 +487,8 @@ class MyService:
     def real_method(self):
         pass
 `
-	f := writeAndOpen(t, "service.py", src)
-	defer f.Close()
-
 	relFile := "services/service.py"
-	result := extractFile(f, relFile, false)
+	result := astExtract(t, relFile, src, false)
 	idx := byName(result)
 
 	// fake_def and FakeClass inside the docstring must NOT appear.
@@ -563,11 +518,8 @@ class Validator:
     def validate(self, value):
         pass
 `
-	f := writeAndOpen(t, "validator.py", src)
-	defer f.Close()
-
 	relFile := "pkg/validator.py"
-	result := extractFile(f, relFile, false)
+	result := astExtract(t, relFile, src, false)
 	idx := byName(result)
 
 	validateName := mod(relFile) + ".Validator.validate"
@@ -581,11 +533,8 @@ func TestExtractFile_LineNumbers(t *testing.T) {
     def bar(self):
         pass
 `
-	f := writeAndOpen(t, "foo.py", src)
-	defer f.Close()
-
 	relFile := "pkg/foo.py"
-	result := extractFile(f, relFile, false)
+	result := astExtract(t, relFile, src, false)
 	idx := byName(result)
 
 	clsName := mod(relFile) + ".Foo"
@@ -614,11 +563,8 @@ func TestExtractFile_ClassWithoutBases(t *testing.T) {
 class Foo:
     pass
 `
-	f := writeAndOpen(t, "foo.py", src)
-	defer f.Close()
-
 	relFile := "pkg/foo.py"
-	result := extractFile(f, relFile, false)
+	result := astExtract(t, relFile, src, false)
 	idx := byName(result)
 
 	clsName := mod(relFile) + ".Foo"
@@ -658,11 +604,8 @@ async def post_recommend_v2(
 ) -> None:
     pass
 `
-	f := writeAndOpen(t, "recommend_v2.py", src)
-	defer f.Close()
-
 	relFile := "query_recommender/routes/recommend_v2.py"
-	result := extractFile(f, relFile, false)
+	result := astExtract(t, relFile, src, false)
 
 	routes := factsByKind(result, facts.KindRoute)
 	if len(routes) != 1 {
@@ -711,11 +654,8 @@ class Entity(Base):
     def __repr__(self) -> str:
         return f"<Entity {self.name}>"
 `
-	f := writeAndOpen(t, "entity.py", src)
-	defer f.Close()
-
 	relFile := "db/models/entity.py"
-	result := extractFile(f, relFile, false)
+	result := astExtract(t, relFile, src, false)
 	idx := byName(result)
 
 	// Class with Base inheritance.
@@ -821,77 +761,6 @@ func TestDetect_GoRepo(t *testing.T) {
 	}
 }
 
-// --- Helper unit tests ---
-
-func TestSplitBases_Simple(t *testing.T) {
-	cases := []struct {
-		input string
-		want  []string
-	}{
-		{"Base", []string{"Base"}},
-		{"Base, Mixin", []string{"Base", "Mixin"}},
-		{"CRUDBase[Model, Schema]", []string{"CRUDBase"}},
-		{"Generic[T], Protocol", []string{"Generic", "Protocol"}},
-	}
-	for _, tc := range cases {
-		got := splitBases(tc.input)
-		if len(got) != len(tc.want) {
-			t.Errorf("splitBases(%q): got %v (len %d), want %v (len %d)",
-				tc.input, got, len(got), tc.want, len(tc.want))
-			continue
-		}
-		for i, g := range got {
-			if g != tc.want[i] {
-				t.Errorf("splitBases(%q)[%d]: got %q, want %q", tc.input, i, g, tc.want[i])
-			}
-		}
-	}
-}
-
-func TestSplitBases_Empty(t *testing.T) {
-	got := splitBases("")
-	if len(got) != 0 {
-		t.Errorf("splitBases(%q): got %v, want empty", "", got)
-	}
-}
-
-func TestPopScopes(t *testing.T) {
-	stack := []scopeEntry{
-		{qualifiedName: "pkg.Outer", indent: 0},
-		{qualifiedName: "pkg.Outer.Inner", indent: 4},
-	}
-
-	// A line at indent=4 should pop Inner (4 >= 4) but keep Outer (0 < 4).
-	got := popScopes(stack, 4)
-	if len(got) != 1 || got[0].qualifiedName != "pkg.Outer" {
-		t.Errorf("popScopes at indent=4: got %v, want [pkg.Outer]", got)
-	}
-
-	// A line at indent=0 should pop everything.
-	got = popScopes(stack, 0)
-	if len(got) != 0 {
-		t.Errorf("popScopes at indent=0: got %v, want []", got)
-	}
-}
-
-func TestLineIndent(t *testing.T) {
-	cases := []struct {
-		line string
-		want int
-	}{
-		{"class Foo:", 0},
-		{"    def bar(self):", 4},
-		{"        pass", 8},
-		{"\t\tpass", 8}, // tab = 4 spaces
-		{"", 0},
-	}
-	for _, tc := range cases {
-		got := lineIndent(tc.line)
-		if got != tc.want {
-			t.Errorf("lineIndent(%q) = %d, want %d", tc.line, got, tc.want)
-		}
-	}
-}
 
 // keys returns map keys sorted for deterministic error messages.
 func keys(m map[string]facts.Fact) []string {
@@ -915,11 +784,8 @@ class Config:
     def items(self):
         return []
 `
-	f := writeAndOpen(t, "config.py", src)
-	defer f.Close()
-
 	relFile := "app/config.py"
-	result := extractFile(f, relFile, false)
+	result := astExtract(t, relFile, src, false)
 	idx := byName(result)
 
 	for _, methodName := range []string{
@@ -943,11 +809,8 @@ class Utils:
     def parse(value):
         return int(value)
 `
-	f := writeAndOpen(t, "utils.py", src)
-	defer f.Close()
-
 	relFile := "pkg/utils.py"
-	result := extractFile(f, relFile, false)
+	result := astExtract(t, relFile, src, false)
 	idx := byName(result)
 
 	methName := mod(relFile) + ".Utils.parse"
@@ -970,11 +833,8 @@ class Repo:
     def from_env(cls):
         pass
 `
-	f := writeAndOpen(t, "repo.py", src)
-	defer f.Close()
-
 	relFile := "db/repo.py"
-	result := extractFile(f, relFile, false)
+	result := astExtract(t, relFile, src, false)
 	idx := byName(result)
 
 	methName := mod(relFile) + ".Repo.from_env"
@@ -1002,11 +862,8 @@ class Base(ABC):
     def concrete(self):
         pass
 `
-	f := writeAndOpen(t, "base.py", src)
-	defer f.Close()
-
 	relFile := "core/base.py"
-	result := extractFile(f, relFile, false)
+	result := astExtract(t, relFile, src, false)
 	idx := byName(result)
 
 	executeName := mod(relFile) + ".Base.execute"
@@ -1040,11 +897,8 @@ class Base:
     def create(cls):
         pass
 `
-	f := writeAndOpen(t, "base.py", src)
-	defer f.Close()
-
 	relFile := "core/base.py"
-	result := extractFile(f, relFile, false)
+	result := astExtract(t, relFile, src, false)
 	idx := byName(result)
 
 	methName := mod(relFile) + ".Base.create"
@@ -1067,11 +921,8 @@ func TestExtractFile_Task_Bare(t *testing.T) {
 def process_records():
     pass
 `
-	f := writeAndOpen(t, "tasks.py", src)
-	defer f.Close()
-
 	relFile := "jobs/tasks.py"
-	result := extractFile(f, relFile, false)
+	result := astExtract(t, relFile, src, false)
 	idx := byName(result)
 
 	fnName := mod(relFile) + ".process_records"
@@ -1096,11 +947,8 @@ from celery import shared_task
 def send_welcome_email(user_id: int) -> None:
     pass
 `
-	f := writeAndOpen(t, "email_tasks.py", src)
-	defer f.Close()
-
 	relFile := "notifications/email_tasks.py"
-	result := extractFile(f, relFile, false)
+	result := astExtract(t, relFile, src, false)
 	idx := byName(result)
 
 	fnName := mod(relFile) + ".send_welcome_email"
@@ -1127,11 +975,8 @@ func TestExtractFile_MultiLineDecorator(t *testing.T) {
 def retry_task(self):
     pass
 `
-	f := writeAndOpen(t, "tasks.py", src)
-	defer f.Close()
-
 	relFile := "jobs/tasks.py"
-	result := extractFile(f, relFile, false)
+	result := astExtract(t, relFile, src, false)
 	idx := byName(result)
 
 	fnName := mod(relFile) + ".retry_task"
@@ -1157,11 +1002,8 @@ def get_count() -> int:
 def no_annotation():
     pass
 `
-	f := writeAndOpen(t, "funcs.py", src)
-	defer f.Close()
-
 	relFile := "pkg/funcs.py"
-	result := extractFile(f, relFile, false)
+	result := astExtract(t, relFile, src, false)
 	idx := byName(result)
 
 	cases := []struct {
@@ -1199,11 +1041,8 @@ def find_user() -> Optional[str]:
 def get_items() -> list[str] | None:
     pass
 `
-	f := writeAndOpen(t, "service.py", src)
-	defer f.Close()
-
 	relFile := "svc/service.py"
-	result := extractFile(f, relFile, false)
+	result := astExtract(t, relFile, src, false)
 	idx := byName(result)
 
 	cases := []struct{ name, want string }{
@@ -1231,11 +1070,8 @@ def create_handler(
 ) -> Optional[str]:
     pass
 `
-	f := writeAndOpen(t, "handler.py", src)
-	defer f.Close()
-
 	relFile := "api/handler.py"
-	result := extractFile(f, relFile, false)
+	result := astExtract(t, relFile, src, false)
 	idx := byName(result)
 
 	fnName := mod(relFile) + ".create_handler"
@@ -1260,11 +1096,8 @@ class Order(models.Model):
 class UserProfile(models.Model):
     user = models.OneToOneField('User', on_delete=models.CASCADE)
 `
-	f := writeAndOpen(t, "models.py", src)
-	defer f.Close()
-
 	relFile := "shop/models.py"
-	result := extractFile(f, relFile, true)
+	result := astExtract(t, relFile, src, true)
 
 	storages := factsByKind(result, facts.KindStorage)
 	if len(storages) != 2 {
@@ -1303,11 +1136,8 @@ class OrderView(APIView):
     def get(self, request):
         pass
 `
-	f := writeAndOpen(t, "views.py", src)
-	defer f.Close()
-
 	relFile := "shop/views.py"
-	result := extractFile(f, relFile, true)
+	result := astExtract(t, relFile, src, true)
 	idx := byName(result)
 
 	clsName := mod(relFile) + ".OrderView"
@@ -1332,11 +1162,8 @@ class OrderSerializer(serializers.ModelSerializer):
         model = Order
         fields = '__all__'
 `
-	f := writeAndOpen(t, "serializers.py", src)
-	defer f.Close()
-
 	relFile := "shop/serializers.py"
-	result := extractFile(f, relFile, true)
+	result := astExtract(t, relFile, src, true)
 	idx := byName(result)
 
 	clsName := mod(relFile) + ".OrderSerializer"
@@ -1364,10 +1191,7 @@ urlpatterns = [
 ]
 `
 	// File must be named urls.py for Django URL extraction.
-	f := writeAndOpen(t, "urls.py", src)
-	defer f.Close()
-
-	result := extractFile(f, "shop/urls.py", true)
+	result := astExtract(t, "shop/urls.py", src, true)
 	routes := factsByKind(result, facts.KindRoute)
 
 	if len(routes) != 3 {
@@ -1394,10 +1218,7 @@ urlpatterns = [
     path('orders/', views.OrderListView.as_view()),
 ]
 `
-	f := writeAndOpen(t, "routing.py", src)
-	defer f.Close()
-
-	result := extractFile(f, "shop/routing.py", true)
+	result := astExtract(t, "shop/routing.py", src, true)
 	routes := factsByKind(result, facts.KindRoute)
 	if len(routes) != 0 {
 		t.Errorf("expected no routes in non-urls.py file, got %d", len(routes))
@@ -1416,11 +1237,8 @@ def order_list(request):
 def order_detail(request, pk):
     pass
 `
-	f := writeAndOpen(t, "views.py", src)
-	defer f.Close()
-
 	relFile := "shop/views.py"
-	result := extractFile(f, relFile, true)
+	result := astExtract(t, relFile, src, true)
 	routes := factsByKind(result, facts.KindRoute)
 
 	// order_list has GET+POST → 2 routes; order_detail has GET → 1 route.

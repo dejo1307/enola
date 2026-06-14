@@ -121,7 +121,11 @@ func (w *pyWalker) walkStatement(node *sitter.Node) {
 		w.handleDecoratedDefinition(node)
 	case "expression_statement":
 		// __tablename__ = "foo" (SQLAlchemy) lives here at class body level.
+		// urlpatterns = [...] (Django) lives at module level.
 		w.handleExprStatement(node)
+	case "assignment":
+		// tree-sitter may parse assignments as "assignment" nodes at module level.
+		w.handleAssignment(node)
 	case "block":
 		for i := uint(0); i < uint(node.ChildCount()); i++ {
 			w.walkStatement(node.Child(i))
@@ -148,7 +152,7 @@ func (w *pyWalker) handleImport(node *sitter.Node) {
 			} else {
 				name = pyText(c, w.src)
 			}
-			target := w.dir + " -> " + name
+			target := w.module + " -> " + name
 			w.out = append(w.out, facts.Fact{
 				Kind: facts.KindDependency,
 				Name: target,
@@ -184,13 +188,13 @@ func (w *pyWalker) handleFromImport(node *sitter.Node) {
 	isRelative := strings.HasPrefix(moduleName, ".") ||
 		strings.HasPrefix(pyText(node, w.src), "from .")
 
-	target := w.dir + " -> " + moduleName
+	target := w.module + " -> " + moduleName
 	w.out = append(w.out, facts.Fact{
 		Kind: facts.KindDependency,
 		Name: target,
 		File: w.relFile,
 		Line: int(node.StartPosition().Row) + 1,
-		Props: map[string]any{"language": "python"},
+		Props: map[string]any{"language": "python", "from": true},
 		Relations: []facts.Relation{
 			{Kind: facts.RelImports, Target: moduleName},
 		},
@@ -248,6 +252,8 @@ func (w *pyWalker) setImport(local, target string) {
 func (w *pyWalker) handleDecoratedDefinition(node *sitter.Node) {
 	var decorators []string
 	var pendingApiViewMethods []string
+	// pendingRoutes holds route facts emitted from decorators before we see the handler name.
+	var pendingRouteFacts []*facts.Fact
 
 	for i := uint(0); i < uint(node.ChildCount()); i++ {
 		c := node.Child(i)
@@ -256,17 +262,21 @@ func (w *pyWalker) handleDecoratedDefinition(node *sitter.Node) {
 			text := pyText(c, w.src)
 			// FastAPI / Starlette route decorator.
 			if m := routeDecoratorRe.FindStringSubmatch(text); m != nil {
-				w.out = append(w.out, facts.Fact{
+				method := strings.ToUpper(m[2])
+				path := m[3]
+				rf := facts.Fact{
 					Kind: facts.KindRoute,
-					Name: strings.ToUpper(m[2]) + " " + m[3],
+					Name: method + " " + path,
 					File: w.relFile,
 					Line: int(c.StartPosition().Row) + 1,
 					Props: map[string]any{
-						"method":    strings.ToUpper(m[2]),
-						"path":      m[3],
-						"framework": "fastapi",
+						"http_method": method,
+						"path":        path,
+						"framework":   "fastapi",
 					},
-				})
+				}
+				w.out = append(w.out, rf)
+				pendingRouteFacts = append(pendingRouteFacts, &w.out[len(w.out)-1])
 				continue
 			}
 			// DRF @api_view(['GET','POST']).
@@ -283,9 +293,13 @@ func (w *pyWalker) handleDecoratedDefinition(node *sitter.Node) {
 
 		case "function_definition":
 			w.handleFunction(c, decorators)
+			handlerName := w.module + "." + w.qualify(pyFuncName(c, w.src))
+			// Back-fill handler into pending FastAPI route facts.
+			for _, rf := range pendingRouteFacts {
+				rf.Props["handler"] = handlerName
+			}
 			// @api_view routes — emit after we know the handler name.
 			if len(pendingApiViewMethods) > 0 {
-				handlerName := w.module + "." + w.qualify(pyFuncName(c, w.src))
 				for _, meth := range pendingApiViewMethods {
 					w.out = append(w.out, facts.Fact{
 						Kind: facts.KindRoute,
@@ -293,9 +307,9 @@ func (w *pyWalker) handleDecoratedDefinition(node *sitter.Node) {
 						File: w.relFile,
 						Line: int(c.StartPosition().Row) + 1,
 						Props: map[string]any{
-							"method":    meth,
-							"framework": "django",
-							"handler":   handlerName,
+							"http_method": meth,
+							"framework":   "django",
+							"handler":     handlerName,
 						},
 					})
 				}
@@ -327,10 +341,23 @@ func (w *pyWalker) handleClass(node *sitter.Node, decorators []string) {
 	if args := node.ChildByFieldName("superclasses"); args != nil {
 		for i := uint(0); i < uint(args.ChildCount()); i++ {
 			c := args.Child(i)
-			if c.Kind() == "identifier" || c.Kind() == "attribute" {
+			switch c.Kind() {
+			case "identifier":
 				base := pyText(c, w.src)
 				bases = append(bases, base)
 				rels = append(rels, facts.Relation{Kind: facts.RelImplements, Target: base})
+			case "attribute":
+				base := pyText(c, w.src)
+				bases = append(bases, base)
+				rels = append(rels, facts.Relation{Kind: facts.RelImplements, Target: base})
+			case "subscript":
+				// Generic base: CRUDBase[ModelType, IdType] — strip the type params.
+				valueNode := c.ChildByFieldName("value")
+				if valueNode != nil {
+					base := pyText(valueNode, w.src)
+					bases = append(bases, base)
+					rels = append(rels, facts.Relation{Kind: facts.RelImplements, Target: base})
+				}
 			}
 		}
 	}
@@ -372,27 +399,6 @@ func (w *pyWalker) handleClass(node *sitter.Node, decorators []string) {
 		}
 	}
 
-	// Django urls.py: emit route facts from path()/re_path() calls in the class body.
-	if w.isDjango && filepath.Base(w.relFile) == "urls.py" {
-		bodyNode := node.ChildByFieldName("body")
-		if bodyNode != nil {
-			bodyText := pyText(bodyNode, w.src)
-			for _, m := range urlPathRe.FindAllStringSubmatch(bodyText, -1) {
-				w.out = append(w.out, facts.Fact{
-					Kind: facts.KindRoute,
-					Name: "* " + m[1],
-					File: w.relFile,
-					Line: int(node.StartPosition().Row) + 1,
-					Props: map[string]any{
-						"path":      m[1],
-						"handler":   m[2],
-						"framework": "django",
-					},
-				})
-			}
-		}
-	}
-
 	f := facts.Fact{
 		Kind:      facts.KindSymbol,
 		Name:      qualName,
@@ -424,8 +430,14 @@ func (w *pyWalker) handleFunction(node *sitter.Node, decorators []string) {
 	name := pyText(nameNode, w.src)
 	qualName := w.module + "." + w.qualify(name)
 
+	// Determine if this is a method (inside a class) or a top-level function.
+	symbolKind := facts.SymbolFunc
+	if len(w.typeStack) > 0 {
+		symbolKind = facts.SymbolMethod
+	}
+
 	props := map[string]any{
-		"symbol_kind": facts.SymbolFunc,
+		"symbol_kind": symbolKind,
 		"language":    "python",
 	}
 	if len(w.typeStack) > 0 {
@@ -473,11 +485,17 @@ func (w *pyWalker) handleFunction(node *sitter.Node, decorators []string) {
 	w.popOwner()
 }
 
-// handleExprStatement checks for SQLAlchemy __tablename__ assignments.
+// handleExprStatement checks for SQLAlchemy __tablename__ assignments and
+// Django urlpatterns at module/class level.
 func (w *pyWalker) handleExprStatement(node *sitter.Node) {
 	text := pyText(node, w.src)
 	if m := tableNameRe.FindStringSubmatch(text); m != nil {
-		w.out = append(w.out, facts.Fact{
+		// Find the enclosing class name for the storage fact.
+		className := ""
+		if len(w.typeStack) > 0 {
+			className = w.module + "." + w.enclosingType()
+		}
+		sf := facts.Fact{
 			Kind: facts.KindStorage,
 			Name: m[1],
 			File: w.relFile,
@@ -486,7 +504,51 @@ func (w *pyWalker) handleExprStatement(node *sitter.Node) {
 				"storage_kind": "table",
 				"framework":    "sqlalchemy",
 			},
-		})
+		}
+		if className != "" {
+			sf.Props["class"] = className
+			sf.Relations = []facts.Relation{{Kind: facts.RelDeclares, Target: w.dir}}
+		}
+		w.out = append(w.out, sf)
+		return
+	}
+	// Django urls.py: urlpatterns = [...].
+	if w.isDjango && filepath.Base(w.relFile) == "urls.py" {
+		for _, m := range urlPathRe.FindAllStringSubmatch(text, -1) {
+			w.out = append(w.out, facts.Fact{
+				Kind: facts.KindRoute,
+				Name: "* " + m[1],
+				File: w.relFile,
+				Line: int(node.StartPosition().Row) + 1,
+				Props: map[string]any{
+					"path":      m[1],
+					"handler":   m[2],
+					"framework": "django",
+				},
+			})
+		}
+	}
+}
+
+// handleAssignment handles module-level assignment statements (tree-sitter
+// sometimes emits these as "assignment" nodes rather than "expression_statement").
+func (w *pyWalker) handleAssignment(node *sitter.Node) {
+	text := pyText(node, w.src)
+	// Django urls.py: urlpatterns = [...].
+	if w.isDjango && filepath.Base(w.relFile) == "urls.py" {
+		for _, m := range urlPathRe.FindAllStringSubmatch(text, -1) {
+			w.out = append(w.out, facts.Fact{
+				Kind: facts.KindRoute,
+				Name: "* " + m[1],
+				File: w.relFile,
+				Line: int(node.StartPosition().Row) + 1,
+				Props: map[string]any{
+					"path":      m[1],
+					"handler":   m[2],
+					"framework": "django",
+				},
+			})
+		}
 	}
 }
 
