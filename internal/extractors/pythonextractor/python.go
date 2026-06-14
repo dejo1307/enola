@@ -43,10 +43,10 @@ func (e *PythonExtractor) Detect(repoPath string) (bool, error) {
 
 	// Subdirectory search (up to 3 levels deep) — handles monorepos.
 	subMarkers := map[string]bool{
-		"pyproject.toml": true,
-		"setup.py":       true,
+		"pyproject.toml":   true,
+		"setup.py":         true,
 		"requirements.txt": true,
-		"Pipfile":        true,
+		"Pipfile":          true,
 	}
 	found := false
 	_ = filepath.WalkDir(repoPath, func(path string, d fs.DirEntry, err error) error {
@@ -73,6 +73,7 @@ func (e *PythonExtractor) Detect(repoPath string) (bool, error) {
 func (e *PythonExtractor) Extract(ctx context.Context, repoPath string, files []string) ([]facts.Fact, error) {
 	var allFacts []facts.Fact
 	modules := make(map[string]bool)
+	isDjango := detectDjango(repoPath)
 
 	for _, relFile := range files {
 		select {
@@ -92,7 +93,7 @@ func (e *PythonExtractor) Extract(ctx context.Context, repoPath string, files []
 			continue
 		}
 
-		fileFacts := extractFile(f, relFile)
+		fileFacts := extractFile(f, relFile, isDjango)
 		f.Close()
 		allFacts = append(allFacts, fileFacts...)
 
@@ -135,6 +136,52 @@ var (
 
 	// tableNameRe matches SQLAlchemy __tablename__ assignments. Group: (table).
 	tableNameRe = regexp.MustCompile(`^\s*__tablename__\s*=\s*["']([^"']+)["']`)
+
+	// decoratorRe captures the full decorator name for structural prop detection.
+	// Group: (name) e.g. "staticmethod", "app.task".
+	decoratorRe = regexp.MustCompile(`^\s*@([\w.]+)`)
+
+	// returnTypeRe extracts return type from a single-line def signature.
+	// e.g. "def foo(x: int) -> Optional[str]:"
+	returnTypeRe = regexp.MustCompile(`\)\s*->\s*([\w\[\], |.]+?)\s*:`)
+
+	// returnTypeClosingRe matches the closing paren of a multi-line def with
+	// a return type annotation. e.g. "    ) -> Optional[str]:"
+	returnTypeClosingRe = regexp.MustCompile(`^\s*\)\s*->\s*([\w\[\], |.]+?)\s*:`)
+
+	// apiViewRe matches Django REST Framework @api_view decorators.
+	// Group: (methods_list) — bracket contents, e.g. "'GET', 'POST'"
+	apiViewRe = regexp.MustCompile(`^\s*@(?:[\w.]*\.)?api_view\s*\(\s*\[([^\]]+)\]`)
+
+	// httpMethodWordRe extracts uppercase HTTP method tokens from an api_view list.
+	httpMethodWordRe = regexp.MustCompile(`[A-Z]+`)
+
+	// urlPathRe matches Django path() and re_path() calls in urls.py.
+	// Groups: (url_path, view_ref)
+	urlPathRe = regexp.MustCompile(`(?:re_)?path\s*\(\s*r?["']([^"']+)["']\s*,\s*([\w.]+)`)
+)
+
+// Django class base sets used to classify models, views, and serializers.
+var (
+	djangoModelBases = map[string]bool{
+		"Model": true, "AbstractModel": true, "MPTTModel": true,
+		"TimeStampedModel": true, "UUIDModel": true, "PolymorphicModel": true,
+	}
+
+	djangoCBVBases = map[string]bool{
+		"View": true, "APIView": true, "GenericAPIView": true,
+		"ListAPIView": true, "CreateAPIView": true, "RetrieveAPIView": true,
+		"UpdateAPIView": true, "DestroyAPIView": true, "ListCreateAPIView": true,
+		"RetrieveUpdateDestroyAPIView": true, "ViewSet": true, "ModelViewSet": true,
+		"ReadOnlyModelViewSet": true, "TemplateView": true, "DetailView": true,
+		"ListView": true, "CreateView": true, "UpdateView": true, "DeleteView": true,
+		"FormView": true, "RedirectView": true,
+	}
+
+	djangoSerializerBases = map[string]bool{
+		"Serializer": true, "ModelSerializer": true,
+		"HyperlinkedModelSerializer": true, "ListSerializer": true,
+	}
 )
 
 // scopeEntry tracks a class nesting level with its indentation.
@@ -153,24 +200,28 @@ type pendingRoute struct {
 }
 
 // extractFile parses a single Python file and returns facts.
-func extractFile(f *os.File, relFile string) []facts.Fact {
+func extractFile(f *os.File, relFile string, isDjango bool) []facts.Fact {
 	var result []facts.Fact
 	dir := filepath.Dir(relFile)
 	// Python modules are file-based; strip .py to form the module prefix used in
 	// symbol names (e.g. "app/models/order" for "app/models/order.py").
-	// This avoids name collisions between classes in different files of the same
-	// directory.
 	module := strings.TrimSuffix(relFile, ".py")
+	isURLsFile := isDjango && filepath.Base(relFile) == "urls.py"
 
 	scanner := bufio.NewScanner(f)
 	scanner.Buffer(make([]byte, 0, 256*1024), 1024*1024)
 
 	var (
-		lineNum        int
-		scopeStack     []scopeEntry
-		pendingRoutes  []pendingRoute
-		inDocstring    bool
-		docstringQuote string // `"""` or `'''`
+		lineNum               int
+		scopeStack            []scopeEntry
+		pendingRoutes         []pendingRoute
+		pendingDecorators     []string       // decorator names since last def/class
+		pendingApiViewMethods []string       // HTTP methods from @api_view
+		decoratorParenDepth   int            // open-paren depth inside a multi-line decorator arg list
+		pendingFuncProps      map[string]any // props of last emitted func (for return-type backfill)
+		pendingFuncLine       int
+		inDocstring           bool
+		docstringQuote        string // `"""` or `'''`
 	)
 
 	for scanner.Scan() {
@@ -209,15 +260,28 @@ func extractFile(f *os.File, relFile string) []facts.Fact {
 		indent := lineIndent(line)
 
 		// Pop scope entries that are at the same or deeper indentation level.
-		// This handles returning to outer scope when indentation decreases.
 		scopeStack = popScopes(scopeStack, indent)
+
+		// Expire pending return-type backfill after 20 lines.
+		if pendingFuncProps != nil && lineNum-pendingFuncLine > 20 {
+			pendingFuncProps = nil
+		}
+
+		// Check for return type on the closing line of a multi-line function
+		// signature, e.g. "    ) -> Optional[str]:". The props map is shared with
+		// the already-emitted fact, so updating it here updates the fact in-place.
+		if pendingFuncProps != nil {
+			if rt := returnTypeClosingRe.FindStringSubmatch(line); rt != nil {
+				pendingFuncProps["return_type"] = strings.TrimSpace(rt[1])
+				pendingFuncProps = nil
+			}
+		}
 
 		// Class declaration.
 		if m := classRe.FindStringSubmatch(line); m != nil {
 			// m[1]=indent, m[2]=name, m[3]=bases (may be empty)
 			name := m[2]
 			basesStr := strings.TrimSpace(m[3])
-
 			qualName := buildQualName(module, scopeStack, name)
 
 			props := map[string]any{
@@ -229,14 +293,50 @@ func extractFile(f *os.File, relFile string) []facts.Fact {
 				{Kind: facts.RelDeclares, Target: dir},
 			}
 
+			bases := splitBases(basesStr)
+
 			// Emit RelImplements for each base class.
-			if basesStr != "" {
-				for _, base := range splitBases(basesStr) {
-					if base != "" {
-						rels = append(rels, facts.Relation{
-							Kind:   facts.RelImplements,
-							Target: base,
+			for _, base := range bases {
+				if base != "" {
+					rels = append(rels, facts.Relation{
+						Kind:   facts.RelImplements,
+						Target: base,
+					})
+				}
+			}
+
+			// Django-specific class classification.
+			if isDjango {
+				for _, base := range bases {
+					bn := lastComponent(base)
+					if djangoModelBases[bn] {
+						// Emit KindStorage for the Django-inferred table name.
+						result = append(result, facts.Fact{
+							Kind: facts.KindStorage,
+							Name: camelToSnake(name),
+							File: relFile,
+							Line: lineNum,
+							Props: map[string]any{
+								"storage_kind": "table",
+								"framework":    "django",
+								"language":     "python",
+								"class":        qualName,
+							},
+							Relations: []facts.Relation{
+								{Kind: facts.RelDeclares, Target: dir},
+							},
 						})
+						break
+					}
+					if djangoCBVBases[bn] {
+						props["django_component"] = "view"
+						props["framework"] = "django"
+						break
+					}
+					if djangoSerializerBases[bn] {
+						props["django_component"] = "serializer"
+						props["framework"] = "django"
+						break
 					}
 				}
 			}
@@ -256,9 +356,12 @@ func extractFile(f *os.File, relFile string) []facts.Fact {
 				indent:        indent,
 			})
 
-			// A class declaration closes any pending route (decorators above a class
-			// are not route handlers).
+			// A class declaration closes all pending state.
 			pendingRoutes = nil
+			pendingDecorators = nil
+			pendingApiViewMethods = nil
+			decoratorParenDepth = 0
+			pendingFuncProps = nil
 			continue
 		}
 
@@ -289,6 +392,23 @@ func extractFile(f *os.File, relFile string) []facts.Fact {
 				props["async"] = true
 			}
 
+			// Apply structural props from pending decorators.
+			for _, dec := range pendingDecorators {
+				applyDecoratorProps(props, dec)
+			}
+			pendingDecorators = nil
+			decoratorParenDepth = 0
+
+			// Extract return type from the current line (single-line signature).
+			if rt := returnTypeRe.FindStringSubmatch(line); rt != nil {
+				props["return_type"] = strings.TrimSpace(rt[1])
+				pendingFuncProps = nil
+			} else {
+				// Multi-line signature: backfill return type when closing line appears.
+				pendingFuncProps = props
+				pendingFuncLine = lineNum
+			}
+
 			fact := facts.Fact{
 				Kind:  facts.KindSymbol,
 				Name:  fullName,
@@ -300,7 +420,7 @@ func extractFile(f *os.File, relFile string) []facts.Fact {
 				},
 			}
 
-			// If there are pending route decorators, emit route facts now.
+			// Emit FastAPI route facts.
 			for _, pr := range pendingRoutes {
 				result = append(result, facts.Fact{
 					Kind: facts.KindRoute,
@@ -318,6 +438,24 @@ func extractFile(f *os.File, relFile string) []facts.Fact {
 			}
 			pendingRoutes = nil
 
+			// Emit Django @api_view route facts.
+			for _, method := range pendingApiViewMethods {
+				result = append(result, facts.Fact{
+					Kind: facts.KindRoute,
+					Name: method + " (view) " + fullName,
+					File: relFile,
+					Line: lineNum,
+					Props: map[string]any{
+						"http_method": method,
+						"path":        "",
+						"handler":     fullName,
+						"framework":   "django",
+						"language":    "python",
+					},
+				})
+			}
+			pendingApiViewMethods = nil
+
 			result = append(result, fact)
 			continue
 		}
@@ -334,14 +472,61 @@ func extractFile(f *os.File, relFile string) []facts.Fact {
 			continue
 		}
 
-		// Non-route decorator — keep any pending routes (multiple decorators on
-		// the same function are allowed), but don't reset them here.
+		// Any decorator line (@...).
 		if strings.HasPrefix(trimmed, "@") {
+			// Django @api_view(['GET', 'POST']) — parse HTTP methods.
+			if isDjango {
+				if m := apiViewRe.FindStringSubmatch(line); m != nil {
+					methods := httpMethodWordRe.FindAllString(m[1], -1)
+					pendingApiViewMethods = append(pendingApiViewMethods, methods...)
+					decoratorParenDepth = 0 // api_view always single-line
+					continue
+				}
+			}
+
+			// Capture decorator name for structural symbol props.
+			if m := decoratorRe.FindStringSubmatch(line); m != nil {
+				pendingDecorators = append(pendingDecorators, m[1])
+			}
+			// Track open parens so multi-line decorator args don't clear pending state.
+			decoratorParenDepth = strings.Count(line, "(") - strings.Count(line, ")")
+			if decoratorParenDepth < 0 {
+				decoratorParenDepth = 0
+			}
 			continue
 		}
 
-		// Any non-decorator, non-def line clears pending routes.
+		// Inside a multi-line decorator argument list — update depth and wait.
+		if decoratorParenDepth > 0 {
+			decoratorParenDepth += strings.Count(line, "(") - strings.Count(line, ")")
+			if decoratorParenDepth < 0 {
+				decoratorParenDepth = 0
+			}
+			continue
+		}
+
+		// Any non-decorator, non-def line clears all pending state.
 		pendingRoutes = nil
+		pendingDecorators = nil
+		pendingApiViewMethods = nil
+
+		// Django URL patterns in urls.py files.
+		if isURLsFile {
+			if m := urlPathRe.FindStringSubmatch(line); m != nil {
+				result = append(result, facts.Fact{
+					Kind: facts.KindRoute,
+					Name: "* " + m[1],
+					File: relFile,
+					Line: lineNum,
+					Props: map[string]any{
+						"path":      m[1],
+						"handler":   m[2],
+						"framework": "django",
+						"language":  "python",
+					},
+				})
+			}
+		}
 
 		// Import: `import foo.bar`
 		if m := importRe.FindStringSubmatch(line); m != nil {
@@ -413,10 +598,84 @@ func extractFile(f *os.File, relFile string) []facts.Fact {
 		}
 	}
 
+	if err := scanner.Err(); err != nil {
+		log.Printf("[python-extractor] scanner error in %s: %v", relFile, err)
+	}
+
 	return result
 }
 
 // --- Helpers ---
+
+// applyDecoratorProps sets structural boolean props on a symbol based on a
+// decorator name. Only well-known structural decorators produce props; unknown
+// decorators are silently ignored.
+func applyDecoratorProps(props map[string]any, decoratorName string) {
+	// Use the last dot-separated component: "functools.cached_property" → "cached_property".
+	last := decoratorName
+	if idx := strings.LastIndex(decoratorName, "."); idx >= 0 {
+		last = decoratorName[idx+1:]
+	}
+	switch last {
+	case "property", "cached_property":
+		props["property"] = true
+	case "staticmethod":
+		props["static"] = true
+	case "classmethod":
+		props["class_method"] = true
+	case "abstractmethod":
+		props["abstract"] = true
+	case "task":
+		props["task"] = true
+	case "shared_task":
+		// shared_task is Celery-specific; bare @task is used by Airflow, Prefect, Luigi, etc.
+		props["task"] = true
+		props["framework"] = "celery"
+	}
+}
+
+// detectDjango returns true if the project at repoPath uses Django, by scanning
+// common dependency files and checking for manage.py.
+func detectDjango(repoPath string) bool {
+	for _, name := range []string{"requirements.txt", "pyproject.toml", "setup.cfg", "setup.py"} {
+		data, err := os.ReadFile(filepath.Join(repoPath, name))
+		if err != nil {
+			continue
+		}
+		if strings.Contains(strings.ToLower(string(data)), "django") {
+			return true
+		}
+	}
+	_, err := os.Stat(filepath.Join(repoPath, "manage.py"))
+	return err == nil
+}
+
+// camelToSnake converts a PascalCase class name to the snake_case table name
+// Django would auto-generate. e.g. "UserProfile" → "user_profile".
+func camelToSnake(s string) string {
+	var b strings.Builder
+	for i := 0; i < len(s); i++ {
+		ch := s[i]
+		if i > 0 && ch >= 'A' && ch <= 'Z' {
+			b.WriteByte('_')
+		}
+		if ch >= 'A' && ch <= 'Z' {
+			b.WriteByte(ch + 32) // ASCII lowercase
+		} else {
+			b.WriteByte(ch)
+		}
+	}
+	return b.String()
+}
+
+// lastComponent returns the last dot-separated segment of a qualified name.
+// e.g. "models.Model" → "Model", "Model" → "Model".
+func lastComponent(name string) string {
+	if idx := strings.LastIndex(name, "."); idx >= 0 {
+		return name[idx+1:]
+	}
+	return name
+}
 
 // buildQualName constructs a qualified name like "module.Outer.Inner.Name".
 // module is the file-based module path (e.g. "app/models/order" for "app/models/order.py").
@@ -499,11 +758,11 @@ func splitBases(s string) []string {
 // stripGeneric removes generic type parameters from a base class name.
 // e.g. "Generic[T]" → "Generic", "CRUDBase[Model, Schema]" → "CRUDBase".
 func stripGeneric(s string) string {
-	if idx := strings.Index(s, "["); idx >= 0 {
-		return strings.TrimSpace(s[:idx])
+	if before, _, ok := strings.Cut(s, "["); ok {
+		return strings.TrimSpace(before)
 	}
-	if idx := strings.Index(s, "("); idx >= 0 {
-		return strings.TrimSpace(s[:idx])
+	if before, _, ok := strings.Cut(s, "("); ok {
+		return strings.TrimSpace(before)
 	}
 	return strings.TrimSpace(s)
 }

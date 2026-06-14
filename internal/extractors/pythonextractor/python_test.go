@@ -81,7 +81,7 @@ class Order:
 	defer f.Close()
 
 	relFile := "app/models/order.py"
-	result := extractFile(f, relFile)
+	result := extractFile(f, relFile, false)
 	idx := byName(result)
 
 	// Class fact: module.ClassName
@@ -127,7 +127,7 @@ async def fetch_data(url):
 	defer f.Close()
 
 	relFile := "services/utils.py"
-	result := extractFile(f, relFile)
+	result := extractFile(f, relFile, false)
 	idx := byName(result)
 
 	helperName := mod(relFile) + ".helper"
@@ -162,7 +162,7 @@ class VespaSink(EmbeddingsSink):
 	defer f.Close()
 
 	relFile := "sinks/vespa_sink.py"
-	result := extractFile(f, relFile)
+	result := extractFile(f, relFile, false)
 	idx := byName(result)
 
 	clsName := mod(relFile) + ".VespaSink"
@@ -187,7 +187,7 @@ class FeatureGroup(Base, TimestampMixin):
 	defer f.Close()
 
 	relFile := "db/models/feature_group.py"
-	result := extractFile(f, relFile)
+	result := extractFile(f, relFile, false)
 	idx := byName(result)
 
 	clsName := mod(relFile) + ".FeatureGroup"
@@ -212,7 +212,7 @@ class CRUDEntity(CRUDBase[ModelType, IdType]):
 	defer f.Close()
 
 	relFile := "db/crud/crud.py"
-	result := extractFile(f, relFile)
+	result := extractFile(f, relFile, false)
 	idx := byName(result)
 
 	clsName := mod(relFile) + ".CRUDEntity"
@@ -240,7 +240,7 @@ class Outer:
 	defer f.Close()
 
 	relFile := "pkg/nested.py"
-	result := extractFile(f, relFile)
+	result := extractFile(f, relFile, false)
 	idx := byName(result)
 
 	outerName := mod(relFile) + ".Outer"
@@ -285,7 +285,7 @@ class Recommender:
 	defer f.Close()
 
 	relFile := "services/recommender.py"
-	result := extractFile(f, relFile)
+	result := extractFile(f, relFile, false)
 	idx := byName(result)
 
 	methodName := mod(relFile) + ".Recommender.recommend"
@@ -311,7 +311,7 @@ import fastapi
 	defer f.Close()
 
 	relFile := "myapp/app.py"
-	result := extractFile(f, relFile)
+	result := extractFile(f, relFile, false)
 	idx := byName(result)
 
 	for _, target := range []string{"logging", "os", "fastapi"} {
@@ -340,7 +340,7 @@ from .base import Base
 	defer f.Close()
 
 	relFile := "routes/routes.py"
-	result := extractFile(f, relFile)
+	result := extractFile(f, relFile, false)
 	idx := byName(result)
 
 	cases := []struct {
@@ -381,7 +381,7 @@ async def health_check():
 	defer f.Close()
 
 	relFile := "routes/health.py"
-	result := extractFile(f, relFile)
+	result := extractFile(f, relFile, false)
 	routes := factsByKind(result, facts.KindRoute)
 
 	if len(routes) != 1 {
@@ -418,7 +418,7 @@ async def post_recommend_v2(body: RecommendV2Body) -> RecommendV2Response:
 	defer f.Close()
 
 	relFile := "routes/recommend.py"
-	result := extractFile(f, relFile)
+	result := extractFile(f, relFile, false)
 	routes := factsByKind(result, facts.KindRoute)
 
 	if len(routes) != 1 {
@@ -452,7 +452,7 @@ async def delete_item(id: int):
 	f := writeAndOpen(t, "items.py", src)
 	defer f.Close()
 
-	result := extractFile(f, "routes/items.py")
+	result := extractFile(f, "routes/items.py", false)
 	routes := factsByKind(result, facts.KindRoute)
 
 	if len(routes) != 3 {
@@ -481,7 +481,7 @@ async def login():
 	f := writeAndOpen(t, "auth.py", src)
 	defer f.Close()
 
-	result := extractFile(f, "routes/auth.py")
+	result := extractFile(f, "routes/auth.py", false)
 	routes := factsByKind(result, facts.KindRoute)
 
 	if len(routes) != 1 {
@@ -506,7 +506,7 @@ class FeatureGroup(Base):
 	defer f.Close()
 
 	relFile := "db/models/feature_group.py"
-	result := extractFile(f, relFile)
+	result := extractFile(f, relFile, false)
 	storages := factsByKind(result, facts.KindStorage)
 
 	if len(storages) != 1 {
@@ -549,7 +549,7 @@ class MyService:
 	defer f.Close()
 
 	relFile := "services/service.py"
-	result := extractFile(f, relFile)
+	result := extractFile(f, relFile, false)
 	idx := byName(result)
 
 	// fake_def and FakeClass inside the docstring must NOT appear.
@@ -583,7 +583,7 @@ class Validator:
 	defer f.Close()
 
 	relFile := "pkg/validator.py"
-	result := extractFile(f, relFile)
+	result := extractFile(f, relFile, false)
 	idx := byName(result)
 
 	validateName := mod(relFile) + ".Validator.validate"
@@ -601,7 +601,7 @@ func TestExtractFile_LineNumbers(t *testing.T) {
 	defer f.Close()
 
 	relFile := "pkg/foo.py"
-	result := extractFile(f, relFile)
+	result := extractFile(f, relFile, false)
 	idx := byName(result)
 
 	clsName := mod(relFile) + ".Foo"
@@ -634,7 +634,7 @@ class Foo:
 	defer f.Close()
 
 	relFile := "pkg/foo.py"
-	result := extractFile(f, relFile)
+	result := extractFile(f, relFile, false)
 	idx := byName(result)
 
 	clsName := mod(relFile) + ".Foo"
@@ -678,7 +678,7 @@ async def post_recommend_v2(
 	defer f.Close()
 
 	relFile := "query_recommender/routes/recommend_v2.py"
-	result := extractFile(f, relFile)
+	result := extractFile(f, relFile, false)
 
 	routes := factsByKind(result, facts.KindRoute)
 	if len(routes) != 1 {
@@ -731,7 +731,7 @@ class Entity(Base):
 	defer f.Close()
 
 	relFile := "db/models/entity.py"
-	result := extractFile(f, relFile)
+	result := extractFile(f, relFile, false)
 	idx := byName(result)
 
 	// Class with Base inheritance.
@@ -916,4 +916,597 @@ func keys(m map[string]facts.Fact) []string {
 		out = append(out, k)
 	}
 	return out
+}
+
+// --- Phase 1a: Decorator tracking ---
+
+func TestExtractFile_DecoratorProps_Property(t *testing.T) {
+	src := `
+class Config:
+    @property
+    def name(self) -> str:
+        return self._name
+
+    @cached_property
+    def items(self):
+        return []
+`
+	f := writeAndOpen(t, "config.py", src)
+	defer f.Close()
+
+	relFile := "app/config.py"
+	result := extractFile(f, relFile, false)
+	idx := byName(result)
+
+	for _, methodName := range []string{
+		mod(relFile) + ".Config.name",
+		mod(relFile) + ".Config.items",
+	} {
+		m, ok := idx[methodName]
+		if !ok {
+			t.Fatalf("missing %q; keys: %v", methodName, keys(idx))
+		}
+		if m.Props["property"] != true {
+			t.Errorf("%s: property = %v, want true", methodName, m.Props["property"])
+		}
+	}
+}
+
+func TestExtractFile_DecoratorProps_Staticmethod(t *testing.T) {
+	src := `
+class Utils:
+    @staticmethod
+    def parse(value):
+        return int(value)
+`
+	f := writeAndOpen(t, "utils.py", src)
+	defer f.Close()
+
+	relFile := "pkg/utils.py"
+	result := extractFile(f, relFile, false)
+	idx := byName(result)
+
+	methName := mod(relFile) + ".Utils.parse"
+	m, ok := idx[methName]
+	if !ok {
+		t.Fatalf("missing %q; keys: %v", methName, keys(idx))
+	}
+	if m.Props["static"] != true {
+		t.Errorf("parse: static = %v, want true", m.Props["static"])
+	}
+	if m.Props["class_method"] == true {
+		t.Error("parse: class_method should not be set")
+	}
+}
+
+func TestExtractFile_DecoratorProps_Classmethod(t *testing.T) {
+	src := `
+class Repo:
+    @classmethod
+    def from_env(cls):
+        pass
+`
+	f := writeAndOpen(t, "repo.py", src)
+	defer f.Close()
+
+	relFile := "db/repo.py"
+	result := extractFile(f, relFile, false)
+	idx := byName(result)
+
+	methName := mod(relFile) + ".Repo.from_env"
+	m, ok := idx[methName]
+	if !ok {
+		t.Fatalf("missing %q; keys: %v", methName, keys(idx))
+	}
+	if m.Props["class_method"] != true {
+		t.Errorf("from_env: class_method = %v, want true", m.Props["class_method"])
+	}
+	if m.Props["static"] == true {
+		t.Error("from_env: static should not be set")
+	}
+}
+
+func TestExtractFile_DecoratorProps_Abstractmethod(t *testing.T) {
+	src := `
+from abc import ABC, abstractmethod
+
+class Base(ABC):
+    @abstractmethod
+    def execute(self):
+        pass
+
+    def concrete(self):
+        pass
+`
+	f := writeAndOpen(t, "base.py", src)
+	defer f.Close()
+
+	relFile := "core/base.py"
+	result := extractFile(f, relFile, false)
+	idx := byName(result)
+
+	executeName := mod(relFile) + ".Base.execute"
+	execute, ok := idx[executeName]
+	if !ok {
+		t.Fatalf("missing %q; keys: %v", executeName, keys(idx))
+	}
+	if execute.Props["abstract"] != true {
+		t.Errorf("execute: abstract = %v, want true", execute.Props["abstract"])
+	}
+
+	// concrete() must NOT have abstract set.
+	concreteName := mod(relFile) + ".Base.concrete"
+	concrete, ok := idx[concreteName]
+	if !ok {
+		t.Fatalf("missing %q", concreteName)
+	}
+	if concrete.Props["abstract"] == true {
+		t.Error("concrete: abstract should not be set")
+	}
+}
+
+func TestExtractFile_DecoratorProps_StackedDecorators(t *testing.T) {
+	// @classmethod + @abstractmethod on the same method — both props must be set.
+	src := `
+from abc import abstractmethod
+
+class Base:
+    @classmethod
+    @abstractmethod
+    def create(cls):
+        pass
+`
+	f := writeAndOpen(t, "base.py", src)
+	defer f.Close()
+
+	relFile := "core/base.py"
+	result := extractFile(f, relFile, false)
+	idx := byName(result)
+
+	methName := mod(relFile) + ".Base.create"
+	m, ok := idx[methName]
+	if !ok {
+		t.Fatalf("missing %q; keys: %v", methName, keys(idx))
+	}
+	if m.Props["class_method"] != true {
+		t.Errorf("create: class_method = %v, want true", m.Props["class_method"])
+	}
+	if m.Props["abstract"] != true {
+		t.Errorf("create: abstract = %v, want true", m.Props["abstract"])
+	}
+}
+
+func TestExtractFile_Task_Bare(t *testing.T) {
+	// Bare @task — framework-agnostic (Airflow, Prefect, etc.).
+	src := `
+@task
+def process_records():
+    pass
+`
+	f := writeAndOpen(t, "tasks.py", src)
+	defer f.Close()
+
+	relFile := "jobs/tasks.py"
+	result := extractFile(f, relFile, false)
+	idx := byName(result)
+
+	fnName := mod(relFile) + ".process_records"
+	fn, ok := idx[fnName]
+	if !ok {
+		t.Fatalf("missing %q; keys: %v", fnName, keys(idx))
+	}
+	if fn.Props["task"] != true {
+		t.Errorf("process_records: task = %v, want true", fn.Props["task"])
+	}
+	if fn.Props["framework"] != nil {
+		t.Errorf("process_records: framework = %v, want nil for bare @task", fn.Props["framework"])
+	}
+}
+
+func TestExtractFile_Task_SharedTask(t *testing.T) {
+	// @shared_task is Celery-specific and must set framework="celery".
+	src := `
+from celery import shared_task
+
+@shared_task
+def send_welcome_email(user_id: int) -> None:
+    pass
+`
+	f := writeAndOpen(t, "email_tasks.py", src)
+	defer f.Close()
+
+	relFile := "notifications/email_tasks.py"
+	result := extractFile(f, relFile, false)
+	idx := byName(result)
+
+	fnName := mod(relFile) + ".send_welcome_email"
+	fn, ok := idx[fnName]
+	if !ok {
+		t.Fatalf("missing %q; keys: %v", fnName, keys(idx))
+	}
+	if fn.Props["task"] != true {
+		t.Errorf("send_welcome_email: task = %v, want true", fn.Props["task"])
+	}
+	if fn.Props["framework"] != "celery" {
+		t.Errorf("send_welcome_email: framework = %v, want celery", fn.Props["framework"])
+	}
+}
+
+func TestExtractFile_MultiLineDecorator(t *testing.T) {
+	// Multi-line decorator args must not clear pending state before the def.
+	// Without the bracket-depth fix the continuation lines clear pendingDecorators.
+	src := `
+@task(
+    bind=True,
+    max_retries=3,
+)
+def retry_task(self):
+    pass
+`
+	f := writeAndOpen(t, "tasks.py", src)
+	defer f.Close()
+
+	relFile := "jobs/tasks.py"
+	result := extractFile(f, relFile, false)
+	idx := byName(result)
+
+	fnName := mod(relFile) + ".retry_task"
+	fn, ok := idx[fnName]
+	if !ok {
+		t.Fatalf("missing %q; keys: %v", fnName, keys(idx))
+	}
+	if fn.Props["task"] != true {
+		t.Errorf("retry_task: task = %v, want true (multi-line decorator must survive)", fn.Props["task"])
+	}
+}
+
+// --- Phase 1b: Return type hints ---
+
+func TestExtractFile_ReturnType_SingleLine(t *testing.T) {
+	src := `
+def is_ready() -> bool:
+    return True
+
+def get_count() -> int:
+    return 42
+
+def no_annotation():
+    pass
+`
+	f := writeAndOpen(t, "funcs.py", src)
+	defer f.Close()
+
+	relFile := "pkg/funcs.py"
+	result := extractFile(f, relFile, false)
+	idx := byName(result)
+
+	cases := []struct {
+		name string
+		want string
+	}{
+		{mod(relFile) + ".is_ready", "bool"},
+		{mod(relFile) + ".get_count", "int"},
+	}
+	for _, tc := range cases {
+		fn, ok := idx[tc.name]
+		if !ok {
+			t.Fatalf("missing %q", tc.name)
+		}
+		if fn.Props["return_type"] != tc.want {
+			t.Errorf("%s: return_type = %v, want %q", tc.name, fn.Props["return_type"], tc.want)
+		}
+	}
+
+	// no_annotation must have no return_type prop.
+	noAnn := idx[mod(relFile)+".no_annotation"]
+	if noAnn.Props["return_type"] != nil {
+		t.Errorf("no_annotation: return_type = %v, want nil", noAnn.Props["return_type"])
+	}
+}
+
+func TestExtractFile_ReturnType_Complex(t *testing.T) {
+	src := `
+def get_config() -> dict[str, Any]:
+    pass
+
+def find_user() -> Optional[str]:
+    pass
+
+def get_items() -> list[str] | None:
+    pass
+`
+	f := writeAndOpen(t, "service.py", src)
+	defer f.Close()
+
+	relFile := "svc/service.py"
+	result := extractFile(f, relFile, false)
+	idx := byName(result)
+
+	cases := []struct{ name, want string }{
+		{mod(relFile) + ".get_config", "dict[str, Any]"},
+		{mod(relFile) + ".find_user", "Optional[str]"},
+		{mod(relFile) + ".get_items", "list[str] | None"},
+	}
+	for _, tc := range cases {
+		fn, ok := idx[tc.name]
+		if !ok {
+			t.Fatalf("missing %q", tc.name)
+		}
+		if fn.Props["return_type"] != tc.want {
+			t.Errorf("%s: return_type = %v, want %q", tc.name, fn.Props["return_type"], tc.want)
+		}
+	}
+}
+
+func TestExtractFile_ReturnType_MultiLine(t *testing.T) {
+	// Return type on the closing paren line of a multi-line signature.
+	src := `
+def create_handler(
+    request: Request,
+    response: Response,
+) -> Optional[str]:
+    pass
+`
+	f := writeAndOpen(t, "handler.py", src)
+	defer f.Close()
+
+	relFile := "api/handler.py"
+	result := extractFile(f, relFile, false)
+	idx := byName(result)
+
+	fnName := mod(relFile) + ".create_handler"
+	fn, ok := idx[fnName]
+	if !ok {
+		t.Fatalf("missing %q; keys: %v", fnName, keys(idx))
+	}
+	if fn.Props["return_type"] != "Optional[str]" {
+		t.Errorf("create_handler: return_type = %v, want Optional[str]", fn.Props["return_type"])
+	}
+}
+
+// --- Phase 1c: Django support ---
+
+func TestExtractFile_DjangoModel(t *testing.T) {
+	src := `
+from django.db import models
+
+class Order(models.Model):
+    total = models.DecimalField(max_digits=10, decimal_places=2)
+
+class UserProfile(models.Model):
+    user = models.OneToOneField('User', on_delete=models.CASCADE)
+`
+	f := writeAndOpen(t, "models.py", src)
+	defer f.Close()
+
+	relFile := "shop/models.py"
+	result := extractFile(f, relFile, true)
+
+	storages := factsByKind(result, facts.KindStorage)
+	if len(storages) != 2 {
+		t.Fatalf("expected 2 storage facts, got %d: %v", len(storages), storages)
+	}
+
+	idx := byName(result)
+
+	// Order → "order" (camelToSnake)
+	order, ok := idx["order"]
+	if !ok {
+		t.Fatalf("missing storage fact %q; keys: %v", "order", keys(idx))
+	}
+	if order.Props["framework"] != "django" {
+		t.Errorf("order: framework = %v, want django", order.Props["framework"])
+	}
+	if order.Props["storage_kind"] != "table" {
+		t.Errorf("order: storage_kind = %v, want table", order.Props["storage_kind"])
+	}
+	wantClass := mod(relFile) + ".Order"
+	if order.Props["class"] != wantClass {
+		t.Errorf("order: class = %v, want %q", order.Props["class"], wantClass)
+	}
+
+	// UserProfile → "user_profile"
+	if _, ok := idx["user_profile"]; !ok {
+		t.Errorf("missing storage fact %q; keys: %v", "user_profile", keys(idx))
+	}
+}
+
+func TestExtractFile_DjangoCBV(t *testing.T) {
+	src := `
+from rest_framework.views import APIView
+
+class OrderView(APIView):
+    def get(self, request):
+        pass
+`
+	f := writeAndOpen(t, "views.py", src)
+	defer f.Close()
+
+	relFile := "shop/views.py"
+	result := extractFile(f, relFile, true)
+	idx := byName(result)
+
+	clsName := mod(relFile) + ".OrderView"
+	cls, ok := idx[clsName]
+	if !ok {
+		t.Fatalf("missing %q; keys: %v", clsName, keys(idx))
+	}
+	if cls.Props["django_component"] != "view" {
+		t.Errorf("OrderView: django_component = %v, want view", cls.Props["django_component"])
+	}
+	if cls.Props["framework"] != "django" {
+		t.Errorf("OrderView: framework = %v, want django", cls.Props["framework"])
+	}
+}
+
+func TestExtractFile_DRFSerializer(t *testing.T) {
+	src := `
+from rest_framework import serializers
+
+class OrderSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Order
+        fields = '__all__'
+`
+	f := writeAndOpen(t, "serializers.py", src)
+	defer f.Close()
+
+	relFile := "shop/serializers.py"
+	result := extractFile(f, relFile, true)
+	idx := byName(result)
+
+	clsName := mod(relFile) + ".OrderSerializer"
+	cls, ok := idx[clsName]
+	if !ok {
+		t.Fatalf("missing %q; keys: %v", clsName, keys(idx))
+	}
+	if cls.Props["django_component"] != "serializer" {
+		t.Errorf("OrderSerializer: django_component = %v, want serializer", cls.Props["django_component"])
+	}
+	if cls.Props["framework"] != "django" {
+		t.Errorf("OrderSerializer: framework = %v, want django", cls.Props["framework"])
+	}
+}
+
+func TestExtractFile_DjangoURL(t *testing.T) {
+	src := `
+from django.urls import path
+from . import views
+
+urlpatterns = [
+    path('orders/', views.OrderListView.as_view()),
+    path('orders/<int:pk>/', views.OrderDetailView.as_view()),
+    re_path(r'^legacy/$', views.legacy_view),
+]
+`
+	// File must be named urls.py for Django URL extraction.
+	f := writeAndOpen(t, "urls.py", src)
+	defer f.Close()
+
+	result := extractFile(f, "shop/urls.py", true)
+	routes := factsByKind(result, facts.KindRoute)
+
+	if len(routes) != 3 {
+		t.Fatalf("expected 3 route facts, got %d: %v", len(routes), routes)
+	}
+	idx := byName(result)
+
+	for _, wantName := range []string{"* orders/", "* orders/<int:pk>/", "* ^legacy/$"} {
+		r, ok := idx[wantName]
+		if !ok {
+			t.Errorf("missing route %q; keys: %v", wantName, keys(idx))
+			continue
+		}
+		if r.Props["framework"] != "django" {
+			t.Errorf("%s: framework = %v, want django", wantName, r.Props["framework"])
+		}
+	}
+}
+
+func TestExtractFile_DjangoURL_NonURLsFile(t *testing.T) {
+	// Django URL patterns in a file not named urls.py must NOT produce route facts.
+	src := `
+urlpatterns = [
+    path('orders/', views.OrderListView.as_view()),
+]
+`
+	f := writeAndOpen(t, "routing.py", src)
+	defer f.Close()
+
+	result := extractFile(f, "shop/routing.py", true)
+	routes := factsByKind(result, facts.KindRoute)
+	if len(routes) != 0 {
+		t.Errorf("expected no routes in non-urls.py file, got %d", len(routes))
+	}
+}
+
+func TestExtractFile_DjangoAPIView(t *testing.T) {
+	src := `
+from rest_framework.decorators import api_view
+
+@api_view(['GET', 'POST'])
+def order_list(request):
+    pass
+
+@api_view(['GET'])
+def order_detail(request, pk):
+    pass
+`
+	f := writeAndOpen(t, "views.py", src)
+	defer f.Close()
+
+	relFile := "shop/views.py"
+	result := extractFile(f, relFile, true)
+	routes := factsByKind(result, facts.KindRoute)
+
+	// order_list has GET+POST → 2 routes; order_detail has GET → 1 route.
+	if len(routes) != 3 {
+		t.Fatalf("expected 3 route facts, got %d: %v", len(routes), routes)
+	}
+
+	handlerBase := mod(relFile) + ".order_list"
+	idx := byName(result)
+	for _, wantName := range []string{
+		"GET (view) " + handlerBase,
+		"POST (view) " + handlerBase,
+	} {
+		r, ok := idx[wantName]
+		if !ok {
+			t.Errorf("missing route %q; keys: %v", wantName, keys(idx))
+			continue
+		}
+		if r.Props["framework"] != "django" {
+			t.Errorf("%s: framework = %v, want django", wantName, r.Props["framework"])
+		}
+	}
+}
+
+// --- Helper unit tests ---
+
+func TestCamelToSnake(t *testing.T) {
+	cases := []struct{ input, want string }{
+		{"Order", "order"},
+		{"UserProfile", "user_profile"},
+		{"ProductCategory", "product_category"},
+		{"Foo", "foo"},
+		{"FooBar", "foo_bar"},
+	}
+	for _, tc := range cases {
+		got := camelToSnake(tc.input)
+		if got != tc.want {
+			t.Errorf("camelToSnake(%q) = %q, want %q", tc.input, got, tc.want)
+		}
+	}
+}
+
+func TestDetectDjango(t *testing.T) {
+	t.Run("requirements_txt", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, "requirements.txt"), []byte("django>=4.2\nrest_framework\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if !detectDjango(dir) {
+			t.Error("detectDjango should return true for requirements.txt with django")
+		}
+	})
+
+	t.Run("manage_py", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, "manage.py"), []byte("#!/usr/bin/env python\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if !detectDjango(dir) {
+			t.Error("detectDjango should return true when manage.py is present")
+		}
+	})
+
+	t.Run("no_django", func(t *testing.T) {
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, "requirements.txt"), []byte("fastapi\nsqlalchemy\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if detectDjango(dir) {
+			t.Error("detectDjango should return false for non-Django project")
+		}
+	})
 }
