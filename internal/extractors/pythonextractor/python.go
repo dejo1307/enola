@@ -3,6 +3,7 @@ package pythonextractor
 import (
 	"bufio"
 	"context"
+	"io"
 	"io/fs"
 	"log"
 	"os"
@@ -93,8 +94,14 @@ func (e *PythonExtractor) Extract(ctx context.Context, repoPath string, files []
 			continue
 		}
 
-		fileFacts := extractFile(f, relFile, isDjango)
+		src, readErr := readAll(f)
 		f.Close()
+		var fileFacts []facts.Fact
+		if readErr != nil {
+			log.Printf("[python-extractor] error reading %s: %v", relFile, readErr)
+			continue
+		}
+		fileFacts = extractFileAST(src, relFile, isDjango)
 		allFacts = append(allFacts, fileFacts...)
 
 		dir := filepath.Dir(relFile)
@@ -770,4 +777,12 @@ func stripGeneric(s string) string {
 // isPythonFile returns true if the file has a .py extension.
 func isPythonFile(path string) bool {
 	return strings.HasSuffix(strings.ToLower(path), ".py")
+}
+
+// readAll reads all bytes from an open file, seeking to the start first.
+func readAll(f *os.File) ([]byte, error) {
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		return nil, err
+	}
+	return io.ReadAll(f)
 }

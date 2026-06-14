@@ -10,22 +10,6 @@ import (
 
 // --- Test helpers ---
 
-// writeAndOpen creates a temp file with the given source content, opens it,
-// and returns the open *os.File. The file is closed by the caller.
-func writeAndOpen(t *testing.T, filename, src string) *os.File {
-	t.Helper()
-	dir := t.TempDir()
-	path := filepath.Join(dir, filename)
-	if err := os.WriteFile(path, []byte(src), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	f, err := os.Open(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return f
-}
-
 // byName indexes facts by their Name field for easy lookup.
 func byName(ff []facts.Fact) map[string]facts.Fact {
 	m := make(map[string]facts.Fact, len(ff))

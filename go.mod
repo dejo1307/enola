@@ -6,6 +6,7 @@ require (
 	github.com/modelcontextprotocol/go-sdk v1.3.0
 	github.com/tree-sitter-grammars/tree-sitter-kotlin v1.1.0
 	github.com/tree-sitter/go-tree-sitter v0.24.0
+	github.com/tree-sitter/tree-sitter-python v0.21.1-0.20240818005537-55a9b8a4fbfb
 	github.com/tree-sitter/tree-sitter-typescript v0.23.2
 	gopkg.in/yaml.v3 v3.0.1
 )
