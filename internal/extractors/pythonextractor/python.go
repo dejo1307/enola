@@ -1,8 +1,8 @@
 package pythonextractor
 
 import (
-	"bufio"
 	"context"
+	"io"
 	"io/fs"
 	"log"
 	"os"
@@ -43,10 +43,10 @@ func (e *PythonExtractor) Detect(repoPath string) (bool, error) {
 
 	// Subdirectory search (up to 3 levels deep) — handles monorepos.
 	subMarkers := map[string]bool{
-		"pyproject.toml": true,
-		"setup.py":       true,
+		"pyproject.toml":   true,
+		"setup.py":         true,
 		"requirements.txt": true,
-		"Pipfile":        true,
+		"Pipfile":          true,
 	}
 	found := false
 	_ = filepath.WalkDir(repoPath, func(path string, d fs.DirEntry, err error) error {
@@ -73,6 +73,7 @@ func (e *PythonExtractor) Detect(repoPath string) (bool, error) {
 func (e *PythonExtractor) Extract(ctx context.Context, repoPath string, files []string) ([]facts.Fact, error) {
 	var allFacts []facts.Fact
 	modules := make(map[string]bool)
+	isDjango := detectDjango(repoPath)
 
 	for _, relFile := range files {
 		select {
@@ -92,8 +93,14 @@ func (e *PythonExtractor) Extract(ctx context.Context, repoPath string, files []
 			continue
 		}
 
-		fileFacts := extractFile(f, relFile)
+		src, readErr := readAll(f)
 		f.Close()
+		var fileFacts []facts.Fact
+		if readErr != nil {
+			log.Printf("[python-extractor] error reading %s: %v", relFile, readErr)
+			continue
+		}
+		fileFacts = extractFileAST(src, relFile, isDjango)
 		allFacts = append(allFacts, fileFacts...)
 
 		dir := filepath.Dir(relFile)
@@ -114,401 +121,136 @@ func (e *PythonExtractor) Extract(ctx context.Context, repoPath string, files []
 	return allFacts, nil
 }
 
-// --- Regex patterns ---
+// --- Regex patterns used by the AST walker ---
 
 var (
-	// classRe matches class declarations. Groups: (indent, name, bases).
-	classRe = regexp.MustCompile(`^(\s*)class\s+(\w+)\s*(?:\(([^)]*)\))?:`)
-
-	// defRe matches function/method definitions. Groups: (indent, async, name).
-	defRe = regexp.MustCompile(`^(\s*)(async\s+)?def\s+(\w+)\s*\(`)
-
-	// importRe matches bare import statements. Group: (module).
-	importRe = regexp.MustCompile(`^\s*import\s+([\w.]+)`)
-
-	// fromImportRe matches from...import statements. Group: (module).
-	fromImportRe = regexp.MustCompile(`^\s*from\s+([\w.]+)\s+import\s+`)
-
 	// routeDecoratorRe matches FastAPI/Starlette route decorators.
 	// Groups: (object, http_method, path).
 	routeDecoratorRe = regexp.MustCompile(`^\s*@([\w.]+)\.(get|post|put|delete|patch|head|options)\s*\(\s*["']([^"']+)["']`)
 
 	// tableNameRe matches SQLAlchemy __tablename__ assignments. Group: (table).
 	tableNameRe = regexp.MustCompile(`^\s*__tablename__\s*=\s*["']([^"']+)["']`)
+
+	// decoratorRe captures the full decorator name for structural prop detection.
+	// Group: (name) e.g. "staticmethod", "app.task".
+	decoratorRe = regexp.MustCompile(`^\s*@([\w.]+)`)
+
+	// apiViewRe matches Django REST Framework @api_view decorators.
+	// Group: (methods_list) — bracket contents, e.g. "'GET', 'POST'"
+	apiViewRe = regexp.MustCompile(`^\s*@(?:[\w.]*\.)?api_view\s*\(\s*\[([^\]]+)\]`)
+
+	// httpMethodWordRe extracts uppercase HTTP method tokens from an api_view list.
+	httpMethodWordRe = regexp.MustCompile(`[A-Z]+`)
+
+	// urlPathRe matches Django path() and re_path() calls in urls.py.
+	// Groups: (url_path, view_ref)
+	urlPathRe = regexp.MustCompile(`(?:re_)?path\s*\(\s*r?["']([^"']+)["']\s*,\s*([\w.]+)`)
 )
 
-// scopeEntry tracks a class nesting level with its indentation.
-type scopeEntry struct {
-	// qualifiedName is the fully-qualified class name (e.g. "dir.Outer.Inner").
-	qualifiedName string
-	// indent is the column indentation of the class keyword.
-	indent int
-}
-
-// pendingRoute holds a FastAPI route decorator waiting for the handler def.
-type pendingRoute struct {
-	method string
-	path   string
-	line   int
-}
-
-// extractFile parses a single Python file and returns facts.
-func extractFile(f *os.File, relFile string) []facts.Fact {
-	var result []facts.Fact
-	dir := filepath.Dir(relFile)
-	// Python modules are file-based; strip .py to form the module prefix used in
-	// symbol names (e.g. "app/models/order" for "app/models/order.py").
-	// This avoids name collisions between classes in different files of the same
-	// directory.
-	module := strings.TrimSuffix(relFile, ".py")
-
-	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 0, 256*1024), 1024*1024)
-
-	var (
-		lineNum        int
-		scopeStack     []scopeEntry
-		pendingRoutes  []pendingRoute
-		inDocstring    bool
-		docstringQuote string // `"""` or `'''`
-	)
-
-	for scanner.Scan() {
-		lineNum++
-		line := scanner.Text()
-		trimmed := strings.TrimSpace(line)
-
-		// Handle multi-line docstrings / triple-quoted strings.
-		if inDocstring {
-			if strings.Contains(line, docstringQuote) {
-				inDocstring = false
-			}
-			continue
-		}
-
-		// Detect opening of a triple-quoted string. We check after the inDocstring
-		// block so that a line opening and closing on the same line is handled.
-		if q, opens := opensTripleQuote(trimmed); opens {
-			// Count occurrences: if odd number of the quote on this line, we enter
-			// docstring mode for subsequent lines.
-			if !closesOnSameLine(trimmed, q) {
-				inDocstring = true
-				docstringQuote = q
-			}
-			// The line itself is not a declaration, so we can skip to the next line.
-			// (Triple-quote lines are never class/def/import lines.)
-			continue
-		}
-
-		// Skip blank lines and comments.
-		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
-			continue
-		}
-
-		// Determine current line indentation.
-		indent := lineIndent(line)
-
-		// Pop scope entries that are at the same or deeper indentation level.
-		// This handles returning to outer scope when indentation decreases.
-		scopeStack = popScopes(scopeStack, indent)
-
-		// Class declaration.
-		if m := classRe.FindStringSubmatch(line); m != nil {
-			// m[1]=indent, m[2]=name, m[3]=bases (may be empty)
-			name := m[2]
-			basesStr := strings.TrimSpace(m[3])
-
-			qualName := buildQualName(module, scopeStack, name)
-
-			props := map[string]any{
-				"symbol_kind": facts.SymbolClass,
-				"language":    "python",
-			}
-
-			rels := []facts.Relation{
-				{Kind: facts.RelDeclares, Target: dir},
-			}
-
-			// Emit RelImplements for each base class.
-			if basesStr != "" {
-				for _, base := range splitBases(basesStr) {
-					if base != "" {
-						rels = append(rels, facts.Relation{
-							Kind:   facts.RelImplements,
-							Target: base,
-						})
-					}
-				}
-			}
-
-			result = append(result, facts.Fact{
-				Kind:      facts.KindSymbol,
-				Name:      qualName,
-				File:      relFile,
-				Line:      lineNum,
-				Props:     props,
-				Relations: rels,
-			})
-
-			// Push to scope stack so nested members use this class as context.
-			scopeStack = append(scopeStack, scopeEntry{
-				qualifiedName: qualName,
-				indent:        indent,
-			})
-
-			// A class declaration closes any pending route (decorators above a class
-			// are not route handlers).
-			pendingRoutes = nil
-			continue
-		}
-
-		// Function / method definition.
-		if m := defRe.FindStringSubmatch(line); m != nil {
-			// m[1]=indent, m[2]=async (may be empty), m[3]=name
-			isAsync := strings.TrimSpace(m[2]) == "async"
-			funcName := m[3]
-
-			var fullName string
-			var symbolKind string
-
-			if len(scopeStack) > 0 {
-				// We are inside a class — this is a method.
-				fullName = scopeStack[len(scopeStack)-1].qualifiedName + "." + funcName
-				symbolKind = facts.SymbolMethod
-			} else {
-				// Top-level function.
-				fullName = module + "." + funcName
-				symbolKind = facts.SymbolFunc
-			}
-
-			props := map[string]any{
-				"symbol_kind": symbolKind,
-				"language":    "python",
-			}
-			if isAsync {
-				props["async"] = true
-			}
-
-			fact := facts.Fact{
-				Kind:  facts.KindSymbol,
-				Name:  fullName,
-				File:  relFile,
-				Line:  lineNum,
-				Props: props,
-				Relations: []facts.Relation{
-					{Kind: facts.RelDeclares, Target: dir},
-				},
-			}
-
-			// If there are pending route decorators, emit route facts now.
-			for _, pr := range pendingRoutes {
-				result = append(result, facts.Fact{
-					Kind: facts.KindRoute,
-					Name: pr.method + " " + pr.path,
-					File: relFile,
-					Line: pr.line,
-					Props: map[string]any{
-						"http_method": pr.method,
-						"path":        pr.path,
-						"handler":     fullName,
-						"framework":   "fastapi",
-						"language":    "python",
-					},
-				})
-			}
-			pendingRoutes = nil
-
-			result = append(result, fact)
-			continue
-		}
-
-		// Route decorator (@router.get("/path"), @app.post("/path"), etc.).
-		if m := routeDecoratorRe.FindStringSubmatch(line); m != nil {
-			method := strings.ToUpper(m[2])
-			path := m[3]
-			pendingRoutes = append(pendingRoutes, pendingRoute{
-				method: method,
-				path:   path,
-				line:   lineNum,
-			})
-			continue
-		}
-
-		// Non-route decorator — keep any pending routes (multiple decorators on
-		// the same function are allowed), but don't reset them here.
-		if strings.HasPrefix(trimmed, "@") {
-			continue
-		}
-
-		// Any non-decorator, non-def line clears pending routes.
-		pendingRoutes = nil
-
-		// Import: `import foo.bar`
-		if m := importRe.FindStringSubmatch(line); m != nil {
-			importPath := m[1]
-			result = append(result, facts.Fact{
-				Kind: facts.KindDependency,
-				Name: module + " -> " + importPath,
-				File: relFile,
-				Line: lineNum,
-				Props: map[string]any{
-					"language": "python",
-				},
-				Relations: []facts.Relation{
-					{Kind: facts.RelImports, Target: importPath},
-				},
-			})
-			continue
-		}
-
-		// Import: `from foo.bar import ...`
-		if m := fromImportRe.FindStringSubmatch(line); m != nil {
-			importPath := m[1]
-			result = append(result, facts.Fact{
-				Kind: facts.KindDependency,
-				Name: module + " -> " + importPath,
-				File: relFile,
-				Line: lineNum,
-				Props: map[string]any{
-					"language": "python",
-					"from":     true,
-				},
-				Relations: []facts.Relation{
-					{Kind: facts.RelImports, Target: importPath},
-				},
-			})
-			continue
-		}
-
-		// SQLAlchemy table name: `__tablename__ = "tbl"`
-		if m := tableNameRe.FindStringSubmatch(line); m != nil {
-			tableName := m[1]
-
-			// Determine the owning class from the scope stack.
-			ownerClass := ""
-			if len(scopeStack) > 0 {
-				ownerClass = scopeStack[len(scopeStack)-1].qualifiedName
-			}
-
-			props := map[string]any{
-				"storage_kind": "table",
-				"framework":    "sqlalchemy",
-				"language":     "python",
-			}
-			if ownerClass != "" {
-				props["class"] = ownerClass
-			}
-
-			result = append(result, facts.Fact{
-				Kind:  facts.KindStorage,
-				Name:  tableName,
-				File:  relFile,
-				Line:  lineNum,
-				Props: props,
-				Relations: []facts.Relation{
-					{Kind: facts.RelDeclares, Target: dir},
-				},
-			})
-			continue
-		}
+// Django class base sets used to classify models, views, and serializers.
+var (
+	djangoModelBases = map[string]bool{
+		"Model": true, "AbstractModel": true, "MPTTModel": true,
+		"TimeStampedModel": true, "UUIDModel": true, "PolymorphicModel": true,
 	}
 
-	return result
-}
-
-// --- Helpers ---
-
-// buildQualName constructs a qualified name like "module.Outer.Inner.Name".
-// module is the file-based module path (e.g. "app/models/order" for "app/models/order.py").
-func buildQualName(module string, stack []scopeEntry, name string) string {
-	if len(stack) == 0 {
-		return module + "." + name
+	djangoCBVBases = map[string]bool{
+		"View": true, "APIView": true, "GenericAPIView": true,
+		"ListAPIView": true, "CreateAPIView": true, "RetrieveAPIView": true,
+		"UpdateAPIView": true, "DestroyAPIView": true, "ListCreateAPIView": true,
+		"RetrieveUpdateDestroyAPIView": true, "ViewSet": true, "ModelViewSet": true,
+		"ReadOnlyModelViewSet": true, "TemplateView": true, "DetailView": true,
+		"ListView": true, "CreateView": true, "UpdateView": true, "DeleteView": true,
+		"FormView": true, "RedirectView": true,
 	}
-	return stack[len(stack)-1].qualifiedName + "." + name
-}
 
-// popScopes removes scope entries at or deeper than the given indentation.
-func popScopes(stack []scopeEntry, indent int) []scopeEntry {
-	for len(stack) > 0 && stack[len(stack)-1].indent >= indent {
-		stack = stack[:len(stack)-1]
+	djangoSerializerBases = map[string]bool{
+		"Serializer": true, "ModelSerializer": true,
+		"HyperlinkedModelSerializer": true, "ListSerializer": true,
 	}
-	return stack
+)
+
+
+// applyDecoratorProps sets structural boolean props on a symbol based on a
+// decorator name. Only well-known structural decorators produce props; unknown
+// decorators are silently ignored.
+func applyDecoratorProps(props map[string]any, decoratorName string) {
+	// Use the last dot-separated component: "functools.cached_property" → "cached_property".
+	last := decoratorName
+	if idx := strings.LastIndex(decoratorName, "."); idx >= 0 {
+		last = decoratorName[idx+1:]
+	}
+	switch last {
+	case "property", "cached_property":
+		props["property"] = true
+	case "staticmethod":
+		props["static"] = true
+	case "classmethod":
+		props["class_method"] = true
+	case "abstractmethod":
+		props["abstract"] = true
+	case "task":
+		props["task"] = true
+	case "shared_task":
+		// shared_task is Celery-specific; bare @task is used by Airflow, Prefect, Luigi, etc.
+		props["task"] = true
+		props["framework"] = "celery"
+	}
 }
 
-// lineIndent returns the number of leading spaces in a line.
-func lineIndent(line string) int {
-	count := 0
-	for _, ch := range line {
-		if ch == ' ' {
-			count++
-		} else if ch == '\t' {
-			count += 4 // treat tab as 4 spaces
+// detectDjango returns true if the project at repoPath uses Django, by scanning
+// common dependency files and checking for manage.py.
+func detectDjango(repoPath string) bool {
+	for _, name := range []string{"requirements.txt", "pyproject.toml", "setup.cfg", "setup.py"} {
+		data, err := os.ReadFile(filepath.Join(repoPath, name))
+		if err != nil {
+			continue
+		}
+		if strings.Contains(strings.ToLower(string(data)), "django") {
+			return true
+		}
+	}
+	_, err := os.Stat(filepath.Join(repoPath, "manage.py"))
+	return err == nil
+}
+
+// camelToSnake converts a PascalCase class name to the snake_case table name
+// Django would auto-generate. e.g. "UserProfile" → "user_profile".
+func camelToSnake(s string) string {
+	var b strings.Builder
+	for i := 0; i < len(s); i++ {
+		ch := s[i]
+		if i > 0 && ch >= 'A' && ch <= 'Z' {
+			b.WriteByte('_')
+		}
+		if ch >= 'A' && ch <= 'Z' {
+			b.WriteByte(ch + 32) // ASCII lowercase
 		} else {
-			break
+			b.WriteByte(ch)
 		}
 	}
-	return count
+	return b.String()
 }
 
-// opensTripleQuote checks if a trimmed line starts a triple-quoted string and
-// returns the quote style (`"""` or `'''`) and whether it opens one.
-func opensTripleQuote(trimmed string) (string, bool) {
-	for _, q := range []string{`"""`, `'''`} {
-		if strings.Contains(trimmed, q) {
-			return q, true
-		}
+// lastComponent returns the last dot-separated segment of a qualified name.
+// e.g. "models.Model" → "Model", "Model" → "Model".
+func lastComponent(name string) string {
+	if idx := strings.LastIndex(name, "."); idx >= 0 {
+		return name[idx+1:]
 	}
-	return "", false
+	return name
 }
 
-// closesOnSameLine returns true if the triple quote appears an even number of
-// times on the line (opened and closed on the same line).
-func closesOnSameLine(trimmed, q string) bool {
-	count := strings.Count(trimmed, q)
-	return count >= 2
-}
-
-// splitBases splits a Python base class list by comma, respecting bracket nesting
-// so that generic types like `Generic[T]` or `CRUDBase[Model, Schema]` are kept
-// as a single token.
-func splitBases(s string) []string {
-	var result []string
-	depth := 0
-	start := 0
-	for i, ch := range s {
-		switch ch {
-		case '[', '(':
-			depth++
-		case ']', ')':
-			depth--
-		case ',':
-			if depth == 0 {
-				if t := strings.TrimSpace(s[start:i]); t != "" {
-					result = append(result, stripGeneric(t))
-				}
-				start = i + 1
-			}
-		}
-	}
-	if t := strings.TrimSpace(s[start:]); t != "" {
-		result = append(result, stripGeneric(t))
-	}
-	return result
-}
-
-// stripGeneric removes generic type parameters from a base class name.
-// e.g. "Generic[T]" → "Generic", "CRUDBase[Model, Schema]" → "CRUDBase".
-func stripGeneric(s string) string {
-	if idx := strings.Index(s, "["); idx >= 0 {
-		return strings.TrimSpace(s[:idx])
-	}
-	if idx := strings.Index(s, "("); idx >= 0 {
-		return strings.TrimSpace(s[:idx])
-	}
-	return strings.TrimSpace(s)
-}
 
 // isPythonFile returns true if the file has a .py extension.
 func isPythonFile(path string) bool {
 	return strings.HasSuffix(strings.ToLower(path), ".py")
+}
+
+// readAll reads all bytes from an open file, seeking to the start first.
+func readAll(f *os.File) ([]byte, error) {
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		return nil, err
+	}
+	return io.ReadAll(f)
 }
