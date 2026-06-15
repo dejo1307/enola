@@ -50,9 +50,11 @@ type pyWalker struct {
 	// typeStack holds enclosing class names so methods get qualified names.
 	typeStack []string
 
-	// ownerStack: top element is the fact that receives RelCalls / RelInstantiates
-	// discovered while walking its body.
-	ownerStack []*facts.Fact
+	// ownerStack: top element is the index into w.out of the fact that receives
+	// RelCalls / RelInstantiates discovered while walking its body. Indices are
+	// used instead of pointers because appending to w.out can reallocate the
+	// backing array, invalidating any previously captured pointer.
+	ownerStack []int
 
 	// importMap maps a local name to its canonical fact target (empty = external).
 	importMap map[string]string
@@ -62,13 +64,13 @@ type pyWalker struct {
 	methodSets []map[string]bool
 }
 
-func (w *pyWalker) pushOwner(f *facts.Fact) { w.ownerStack = append(w.ownerStack, f) }
+func (w *pyWalker) pushOwner(idx int)       { w.ownerStack = append(w.ownerStack, idx) }
 func (w *pyWalker) popOwner()               { w.ownerStack = w.ownerStack[:len(w.ownerStack)-1] }
 func (w *pyWalker) currentOwner() *facts.Fact {
 	if len(w.ownerStack) == 0 {
 		return nil
 	}
-	return w.ownerStack[len(w.ownerStack)-1]
+	return &w.out[w.ownerStack[len(w.ownerStack)-1]]
 }
 
 func (w *pyWalker) enclosingType() string { return strings.Join(w.typeStack, ".") }
@@ -252,8 +254,10 @@ func (w *pyWalker) setImport(local, target string) {
 func (w *pyWalker) handleDecoratedDefinition(node *sitter.Node) {
 	var decorators []string
 	var pendingApiViewMethods []string
-	// pendingRoutes holds route facts emitted from decorators before we see the handler name.
-	var pendingRouteFacts []*facts.Fact
+	// pendingRouteIndices holds w.out indices of route facts emitted from
+	// decorators before we see the handler name. Indices are used (not pointers)
+	// because subsequent appends to w.out may reallocate its backing array.
+	var pendingRouteIndices []int
 
 	for i := uint(0); i < uint(node.ChildCount()); i++ {
 		c := node.Child(i)
@@ -264,7 +268,7 @@ func (w *pyWalker) handleDecoratedDefinition(node *sitter.Node) {
 			if m := routeDecoratorRe.FindStringSubmatch(text); m != nil {
 				method := strings.ToUpper(m[2])
 				path := m[3]
-				rf := facts.Fact{
+				w.out = append(w.out, facts.Fact{
 					Kind: facts.KindRoute,
 					Name: method + " " + path,
 					File: w.relFile,
@@ -274,9 +278,8 @@ func (w *pyWalker) handleDecoratedDefinition(node *sitter.Node) {
 						"path":        path,
 						"framework":   "fastapi",
 					},
-				}
-				w.out = append(w.out, rf)
-				pendingRouteFacts = append(pendingRouteFacts, &w.out[len(w.out)-1])
+				})
+				pendingRouteIndices = append(pendingRouteIndices, len(w.out)-1)
 				continue
 			}
 			// DRF @api_view(['GET','POST']).
@@ -292,11 +295,16 @@ func (w *pyWalker) handleDecoratedDefinition(node *sitter.Node) {
 			}
 
 		case "function_definition":
+			// @overload stubs are type-checker-only annotations with no runtime
+			// body — skip them to avoid duplicate symbol facts.
+			if hasDecorator(decorators, "overload") {
+				continue
+			}
 			w.handleFunction(c, decorators)
 			handlerName := w.module + "." + w.qualify(pyFuncName(c, w.src))
 			// Back-fill handler into pending FastAPI route facts.
-			for _, rf := range pendingRouteFacts {
-				rf.Props["handler"] = handlerName
+			for _, idx := range pendingRouteIndices {
+				w.out[idx].Props["handler"] = handlerName
 			}
 			// @api_view routes — emit after we know the handler name.
 			if len(pendingApiViewMethods) > 0 {
@@ -409,8 +417,7 @@ func (w *pyWalker) handleClass(node *sitter.Node, decorators []string) {
 	}
 
 	w.out = append(w.out, f)
-	owner := &w.out[len(w.out)-1]
-	w.pushOwner(owner)
+	w.pushOwner(len(w.out) - 1)
 
 	bodyNode := node.ChildByFieldName("body")
 	w.pushType(name, collectPyMethodNames(bodyNode, w.src))
@@ -477,8 +484,7 @@ func (w *pyWalker) handleFunction(node *sitter.Node, decorators []string) {
 	}
 
 	w.out = append(w.out, f)
-	owner := &w.out[len(w.out)-1]
-	w.pushOwner(owner)
+	w.pushOwner(len(w.out) - 1)
 	if bodyNode := node.ChildByFieldName("body"); bodyNode != nil {
 		w.walkForCalls(bodyNode)
 	}
@@ -669,6 +675,18 @@ func collectPyMethodNames(body *sitter.Node, src []byte) map[string]bool {
 		}
 	}
 	return methods
+}
+
+// hasDecorator reports whether any name in decorators has last as its
+// last dot-separated component (e.g. "overload" matches both "overload"
+// and "typing.overload").
+func hasDecorator(decorators []string, last string) bool {
+	for _, d := range decorators {
+		if lastComponent(d) == last {
+			return true
+		}
+	}
+	return false
 }
 
 func pyFuncName(node *sitter.Node, src []byte) string {
